@@ -1,0 +1,122 @@
+# Solaris Configuration File
+
+# Calculation parameters
+calculation:
+  # Insolation calculation settings
+  insolation:
+    # Minimum required insolation duration (hours:minutes:seconds)
+    min_duration: "01:30:00"
+    # Calculation step in minutes
+    time_step: 1
+    # Consider shadowing from surrounding buildings
+    consider_shadowing: true
+    # Shadow calculation accuracy (meters)
+    shadow_accuracy: 0.5
+    
+  # KEO calculation settings
+  keo:
+    # Calculation grid density (points per square meter)
+    grid_density: 0.5
+    # Sky component calculation method
+    sky_component_method: "formula_3_11"  # From Amendment No. 1
+    # Consider reflected component
+    consider_reflected: true
+    # Minimum KEO value (percentage)
+    min_keo: 0.5
+
+# Building standards
+standards:
+  # GOST R 57795-2017
+  gost_57795_2017:
+    enabled: true
+    amendments:
+      - "2021-06-01"  # Amendment No. 1
+      - "2022-09-01"  # Amendment No. 2
+  
+  # SanPiN 1.2.3685-21
+  sanpin_1_2_3685_21:
+    enabled: true
+  
+  # SP 52.13330.2016
+  sp_52_13330_2016:
+    enabled: true
+    amendments:
+      - "2019-11-20"  # Amendment No. 1
+      - "2021-12-28"  # Amendment No. 2
+  
+  # SP 367.1325800.2017
+  sp_367_1325800_2017:
+    enabled: true
+    amendments:
+      - "2020-12-14"  # Amendment No. 1
+      - "2022-12-20"  # Amendment No. 2
+
+# Window properties database
+windows:
+  # Default window types with properties
+  types:
+    single_glazed:
+      glass_thickness: 4.0  # mm
+      transmittance: 0.85
+      frame_factor: 0.75
+    
+    double_glazed:
+      glass_thickness: 6.0  # mm
+      transmittance: 0.75
+      frame_factor: 0.70
+    
+    triple_glazed:
+      glass_thickness: 8.0  # mm
+      transmittance: 0.65
+      frame_factor: 0.65
+
+# Location settings
+location:
+  # Default location (Moscow, Russia)
+  latitude: 55.7558
+  longitude: 37.6173
+  timezone: "Europe/Moscow"
+  # Time zone offset from UTC
+  utc_offset: 3
+
+# Report settings
+reports:
+  # Output format
+  format: "pdf"  # pdf, html, docx
+  # Include diagrams
+  include_diagrams: true
+  # Diagram resolution (DPI)
+  diagram_dpi: 300
+  # Page size
+  page_size: "A4"
+  # Include signature stamps
+  include_stamps: true
+
+# Import settings
+import:
+  # Supported formats
+  formats:
+    - "ifc"  # IFC (Industry Foundation Classes)
+    - "rvt"  # REVIT (via plugin)
+    - "glb"  # GLB (glTF Binary - 3D geometry)
+    - "dwg"  # AutoCAD
+    - "dxf"  # AutoCAD DXF
+  
+  # REVIT export settings
+  revit:
+    # Room naming convention
+    room_naming: "Area {number}"  # Area 1, Area 2, etc.
+    # Building naming convention
+    building_naming: "Building {number}"  # Building 1, Building 2, etc.
+    # Floor organization
+    organize_by_floors: true
+
+# UI settings
+ui:
+  # Theme
+  theme: "light"  # light, dark
+  # Language
+  language: "ru"  # ru, en
+  # Show tooltips
+  show_tooltips: true
+
