@@ -737,6 +737,8 @@ if PYQT6_AVAILABLE:
                 if not self.object_tree_connected:
                     self.object_tree_viewer_widget.item_selected.connect(self.on_object_tree_selection)
                     self.object_tree_connected = True
+                    import logging
+                    logging.info("Object tree selection connected to 3D viewer highlighting")
             
             # Update 3D viewer with building data for window highlighting
             if self.glb_viewer_widget:
@@ -804,15 +806,38 @@ if PYQT6_AVAILABLE:
         
         def on_object_tree_selection(self, selected_object):
             """Handle object selection from object tree viewer."""
-            from models.building import Window
+            from models.building import Window, Building
+            import logging
+            logger = logging.getLogger(__name__)
+            
+            logger.info(f"Object selected in tree: {type(selected_object).__name__}")
+            
+            if not self.glb_viewer_widget:
+                logger.warning("3D viewer widget not available for highlighting")
+                return
+            
+            # Ensure building is set in viewer (needed for highlighting)
+            if self.building:
+                self.glb_viewer_widget.set_building(self.building)
+                logger.debug(f"Building set in 3D viewer for highlighting")
+            
+            # Highlight the object in 3D viewer (without switching tabs automatically)
+            # User can manually switch to 3D viewer tab to see the highlight
             # If a window is selected, highlight it in the 3D viewer
             if isinstance(selected_object, Window):
-                if self.glb_viewer_widget:
-                    self.glb_viewer_widget.highlight_window(selected_object)
+                logger.info(f"Window selected: {selected_object.id} - highlighting in blue")
+                # Highlight the selected window
+                self.glb_viewer_widget.highlight_window(selected_object)
+                logger.info(f"Highlight request sent for window: {selected_object.id}")
+            elif isinstance(selected_object, Building):
+                logger.info(f"Building selected: {selected_object.id} - clearing highlight")
+                # Clear highlight for building selection
+                self.glb_viewer_widget.highlight_window(None)
             else:
-                # Clear highlight if non-window is selected
-                if self.glb_viewer_widget:
-                    self.glb_viewer_widget.highlight_window(None)
+                # For any other object, try to highlight if it's a window-like object
+                logger.debug(f"Other object selected: {type(selected_object)} - attempting highlight")
+                # Try to highlight anyway (might be a window with different type)
+                self.glb_viewer_widget.highlight_window(selected_object)
         
         def update_results_table(self, result):
             """Update results table with calculation results (windows only)."""

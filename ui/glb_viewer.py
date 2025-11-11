@@ -97,28 +97,87 @@ if PYQT6_AVAILABLE:
             self.update()
         
         def highlight_window(self, window):
-            """Highlight a specific window with colored surface."""
+            """Highlight a specific window or object with blue colored surface."""
+            import logging
+            logger = logging.getLogger(__name__)
+            
             if window is None:
                 self.highlighted_window = None
-            else:
+                logger.info("Object highlight cleared")
+                self.update()
+                return
+            
+            # Check if shaders are initialized (OpenGL context must be ready)
+            if self.shader_program is None or self.shader_program_colored is None:
+                logger.warning("OpenGL shaders not initialized yet - cannot highlight. Widget may need to be visible first.")
+                # Store the window to highlight later when shaders are ready
                 self.highlighted_window = window
-                # Generate window mesh if not cached
-                if window.id not in self.window_meshes:
-                    self.window_meshes[window.id] = self._create_window_mesh(window)
+                return
+            
+            # Check if main mesh is loaded
+            if self.mesh is None or len(self.mesh.vertices) == 0:
+                logger.warning(f"Cannot highlight object {getattr(window, 'id', 'unknown')}: No mesh loaded in 3D viewer")
+                return
+            
+            # Check if object has required attributes (id, center, normal, size)
+            if not hasattr(window, 'id'):
+                logger.warning(f"Object {type(window)} does not have 'id' attribute - cannot highlight")
+                return
+            
+            logger.info(f"Highlighting object: {window.id} (type: {type(window).__name__})")
+            self.highlighted_window = window
+            
+            # Generate window mesh if not cached
+            if window.id not in self.window_meshes:
+                logger.debug(f"Creating mesh for object {window.id}")
+                window_mesh = self._create_window_mesh(window)
+                self.window_meshes[window.id] = window_mesh
+                if window_mesh is None:
+                    logger.warning(f"Failed to create mesh for object {window.id} - highlight may not be visible")
+                else:
+                    logger.info(f"Created mesh for object {window.id} with {len(window_mesh.vertices)} vertices, {len(window_mesh.faces)} faces")
+            else:
+                logger.debug(f"Using cached mesh for object {window.id}")
+            
+            # Force update to redraw with highlight
             self.update()
+            logger.info(f"Update called for object highlight: {window.id}")
         
         def _create_window_mesh(self, window):
-            """Create a trimesh representation of a window from Window properties."""
+            """Create a trimesh representation of a window or object from its properties."""
             import trimesh
             from models.building import Window
+            import logging
             
-            if not isinstance(window, Window):
+            logger = logging.getLogger(__name__)
+            
+            # Validate object has required properties (works for Window or any object with these attributes)
+            if not hasattr(window, 'center') or window.center is None:
+                logger.warning(f"Object {getattr(window, 'id', 'unknown')} missing center property")
+                return None
+            if not hasattr(window, 'normal') or window.normal is None:
+                logger.warning(f"Object {getattr(window, 'id', 'unknown')} missing normal property")
+                return None
+            if not hasattr(window, 'size') or window.size is None or len(window.size) < 2:
+                logger.warning(f"Object {getattr(window, 'id', 'unknown')} missing or invalid size property")
                 return None
             
             # Window properties
             center = np.array(window.center)
             normal = np.array(window.normal)
             width, height = window.size
+            
+            # Validate size values
+            if width <= 0 or height <= 0:
+                logger.warning(f"Window {window.id} has invalid size: {width}x{height}")
+                return None
+            
+            # Normalize normal vector
+            normal_norm = np.linalg.norm(normal)
+            if normal_norm < 1e-6:
+                logger.warning(f"Window {window.id} has zero-length normal vector")
+                return None
+            normal = normal / normal_norm
             
             # Create a rectangle representing the window
             # Window is a flat rectangle perpendicular to its normal
@@ -184,8 +243,12 @@ if PYQT6_AVAILABLE:
         def initializeGL(self):
             """Initialize OpenGL."""
             from OpenGL import GL
+            import logging
+            logger = logging.getLogger(__name__)
+            
             GL.glEnable(GL.GL_DEPTH_TEST)
             GL.glClearColor(0.2, 0.2, 0.3, 1.0)
+            logger.info("OpenGL initialized - shaders will be created")
             
             # Simple shader program for default mesh
             vertex_shader = QOpenGLShader(QOpenGLShader.ShaderTypeBit.Vertex)
@@ -230,7 +293,21 @@ if PYQT6_AVAILABLE:
             self.shader_program_colored = QOpenGLShaderProgram()
             self.shader_program_colored.addShader(vertex_shader_colored)
             self.shader_program_colored.addShader(fragment_shader_colored)
-            self.shader_program_colored.link()
+            if not self.shader_program_colored.link():
+                import logging
+                logging.error(f"Failed to link colored shader: {self.shader_program_colored.log()}")
+            else:
+                import logging
+                logging.info("Colored shader program linked successfully")
+            
+            # If there's a pending highlight, apply it now that shaders are ready
+            if self.highlighted_window is not None:
+                import logging
+                logging.info(f"Shaders initialized - applying pending highlight for {self.highlighted_window.id}")
+                # Re-highlight to create mesh and render
+                window_to_highlight = self.highlighted_window
+                self.highlighted_window = None  # Clear first
+                self.highlight_window(window_to_highlight)  # Re-apply
             
         def resizeGL(self, width, height):
             """Handle resize."""
@@ -323,32 +400,47 @@ if PYQT6_AVAILABLE:
             if self.highlighted_window is not None:
                 window_mesh = self.window_meshes.get(self.highlighted_window.id)
                 if window_mesh is not None and len(window_mesh.vertices) > 0:
-                    # Use colored shader
-                    self.shader_program_colored.bind()
-                    self.shader_program_colored.setUniformValue("mvpMatrix", mvp)
-                    
-                    # Highlight color: bright cyan for visibility
-                    color_vec = QVector4D(0.0, 1.0, 1.0, 0.7)  # Cyan, semi-transparent
-                    self.shader_program_colored.setUniformValue("color", color_vec)
-                    
-                    # Enable blending for transparency
-                    GL.glEnable(GL.GL_BLEND)
-                    GL.glBlendFunc(GL.GL_SRC_ALPHA, GL.GL_ONE_MINUS_SRC_ALPHA)
-                    
-                    # Draw window mesh
-                    vertices = window_mesh.vertices
-                    faces = window_mesh.faces
-                    
-                    GL.glBegin(GL.GL_TRIANGLES)
-                    for face in faces:
-                        for vertex_idx in face:
-                            if vertex_idx < len(vertices):
-                                v = vertices[vertex_idx]
-                                GL.glVertex3f(v[0], v[1], v[2])
-                    GL.glEnd()
-                    
-                    GL.glDisable(GL.GL_BLEND)
-                    self.shader_program_colored.release()
+                    # Check if colored shader is available
+                    if self.shader_program_colored is None:
+                        import logging
+                        logging.warning("Colored shader not initialized - cannot highlight window")
+                    else:
+                        try:
+                            # Use colored shader
+                            if not self.shader_program_colored.bind():
+                                import logging
+                                logging.error("Failed to bind colored shader for window highlighting")
+                            else:
+                                self.shader_program_colored.setUniformValue("mvpMatrix", mvp)
+                                
+                                # Highlight color: bright blue for visibility
+                                color_vec = QVector4D(0.0, 0.5, 1.0, 0.8)  # Blue, semi-transparent
+                                self.shader_program_colored.setUniformValue("color", color_vec)
+                                
+                                # Enable blending for transparency
+                                GL.glEnable(GL.GL_BLEND)
+                                GL.glBlendFunc(GL.GL_SRC_ALPHA, GL.GL_ONE_MINUS_SRC_ALPHA)
+                                
+                                # Draw window mesh
+                                vertices = window_mesh.vertices
+                                faces = window_mesh.faces
+                                
+                                GL.glBegin(GL.GL_TRIANGLES)
+                                for face in faces:
+                                    for vertex_idx in face:
+                                        if vertex_idx < len(vertices):
+                                            v = vertices[vertex_idx]
+                                            GL.glVertex3f(v[0], v[1], v[2])
+                                GL.glEnd()
+                                
+                                GL.glDisable(GL.GL_BLEND)
+                                self.shader_program_colored.release()
+                        except Exception as e:
+                            import logging
+                            logging.error(f"Error rendering highlighted window: {e}", exc_info=True)
+                else:
+                    import logging
+                    logging.debug(f"Window mesh not available for highlighting: {self.highlighted_window.id}")
         
         def mousePressEvent(self, event):
             """Handle mouse press for rotation and panning."""
@@ -594,9 +686,29 @@ if PYQT6_AVAILABLE:
                 self.viewer.set_building(building)
         
         def highlight_window(self, window):
-            """Highlight a specific window in the 3D viewer."""
-            if self.opengl_available and hasattr(self.viewer, 'highlight_window'):
+            """Highlight a specific window or object in the 3D viewer."""
+            import logging
+            logger = logging.getLogger(__name__)
+            
+            if not self.opengl_available:
+                logger.warning("OpenGL not available - cannot highlight object")
+                return
+            
+            if not hasattr(self, 'viewer') or self.viewer is None:
+                logger.error("OpenGL viewer widget not initialized - cannot highlight")
+                return
+            
+            if not hasattr(self.viewer, 'highlight_window'):
+                logger.warning("3D viewer does not support highlighting")
+                return
+            
+            window_id = getattr(window, 'id', None) if window else None
+            logger.info(f"Forwarding highlight request to OpenGL widget for object: {window_id}")
+            try:
                 self.viewer.highlight_window(window)
+                logger.info(f"Highlight request forwarded successfully")
+            except Exception as e:
+                logger.error(f"Error forwarding highlight request: {e}", exc_info=True)
         
         def reset_view(self):
             """Reset view to default."""
@@ -717,19 +829,66 @@ else:
             pass  # Window highlighting requires OpenGL
         
         def launch_trimesh_viewer(self):
-            """Launch trimesh's built-in viewer in a separate thread."""
+            """Launch trimesh's built-in viewer."""
             if self.mesh is not None:
                 try:
-                    # Launch viewer in a separate thread to avoid blocking UI
-                    import threading
-                    def show_mesh():
-                        try:
-                            self.mesh.show()
-                        except Exception as e:
-                            print(f"Error showing mesh: {e}")
+                    # Check if pyglet is available
+                    try:
+                        import pyglet
+                        if not hasattr(pyglet, 'app'):
+                            raise ImportError("pyglet.app not available")
+                    except ImportError as e:
+                        QMessageBox.warning(
+                            self,
+                            "Viewer Error / Ошибка просмотра",
+                            "Trimesh viewer requires pyglet<2.\n"
+                            "Trimesh просмотр требует pyglet<2.\n\n"
+                            f"Error / Ошибка: {str(e)}\n\n"
+                            "Please install: pip install \"pyglet<2\""
+                        )
+                        return
                     
-                    thread = threading.Thread(target=show_mesh, daemon=True)
-                    thread.start()
+                    # Try to launch viewer (must be in main thread for pyglet)
+                    # Note: This may block the UI, but pyglet requires main thread
+                    try:
+                        self.mesh.show()
+                    except RuntimeError as e:
+                        error_msg = str(e)
+                        if "EventLoop.run()" in error_msg or "thread" in error_msg.lower():
+                            QMessageBox.warning(
+                                self,
+                                "Viewer Error / Ошибка просмотра",
+                                "Trimesh viewer cannot run in a separate thread.\n"
+                                "Trimesh просмотр не может работать в отдельном потоке.\n\n"
+                                "The viewer requires the main thread.\n"
+                                "Просмотр требует главный поток.\n\n"
+                                "Note: This feature may not work in all environments.\n"
+                                "Примечание: Эта функция может не работать во всех средах."
+                            )
+                        elif "OpenGL" in error_msg or "wgl" in error_msg.lower() or "ARB" in error_msg:
+                            QMessageBox.warning(
+                                self,
+                                "Viewer Error / Ошибка просмотра",
+                                "OpenGL driver does not support required features.\n"
+                                "Драйвер OpenGL не поддерживает необходимые функции.\n\n"
+                                f"Error / Ошибка: {error_msg}\n\n"
+                                "The trimesh viewer requires OpenGL support.\n"
+                                "Trimesh просмотр требует поддержку OpenGL.\n\n"
+                                "Try using the embedded 3D viewer instead.\n"
+                                "Попробуйте использовать встроенный 3D просмотр."
+                            )
+                        else:
+                            QMessageBox.warning(
+                                self,
+                                "Viewer Error / Ошибка просмотра",
+                                f"Could not launch viewer / Не удалось запустить просмотр:\n{error_msg}"
+                            )
+                    except Exception as e:
+                        QMessageBox.warning(
+                            self,
+                            "Viewer Error / Ошибка просмотра",
+                            f"Could not launch viewer / Не удалось запустить просмотр:\n{str(e)}"
+                        )
                 except Exception as e:
                     QMessageBox.warning(
                         self,

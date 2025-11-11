@@ -409,7 +409,14 @@ class GLBImporter(BaseImporter):
                 face_normals = mesh.face_normals
                 face_areas = mesh.area_faces
                 if len(face_areas) > 0:
-                    weighted_normal = np.average(face_normals, axis=0, weights=face_areas)
+                    # Check if weights sum to non-zero before using weighted average
+                    total_area = np.sum(face_areas)
+                    if total_area > 1e-10:  # Check if weights sum to non-zero
+                        weighted_normal = np.average(face_normals, axis=0, weights=face_areas)
+                    else:
+                        # Fallback to unweighted average if all areas are zero
+                        weighted_normal = np.mean(face_normals, axis=0)
+                    
                     norm = np.linalg.norm(weighted_normal)
                     if norm > 1e-10:  # Avoid division by zero
                         normal = tuple(weighted_normal / norm)
@@ -588,9 +595,26 @@ class GLBImporter(BaseImporter):
                     max_center = np.max(cell_centers, axis=0)
                     size = max_center - min_center
                     
-                    # Calculate average normal
-                    weighted_normal = np.average(cell_normals, axis=0, weights=cell_areas)
-                    avg_normal = weighted_normal / np.linalg.norm(weighted_normal)
+                    # Calculate average normal (handle zero weights)
+                    total_area = np.sum(cell_areas)
+                    if total_area > 1e-10:  # Check if weights sum to non-zero
+                        weighted_normal = np.average(cell_normals, axis=0, weights=cell_areas)
+                    else:
+                        # Fallback to unweighted average if all areas are zero
+                        weighted_normal = np.mean(cell_normals, axis=0)
+                    
+                    norm = np.linalg.norm(weighted_normal)
+                    if norm > 1e-10:
+                        avg_normal = weighted_normal / norm
+                    else:
+                        # Fallback to first normal if weighted normal is zero
+                        avg_normal = cell_normals[0] if len(cell_normals) > 0 else np.array([0.0, 1.0, 0.0])
+                        norm_fallback = np.linalg.norm(avg_normal)
+                        if norm_fallback > 1e-10:
+                            avg_normal = avg_normal / norm_fallback
+                        else:
+                            # Final fallback to default normal
+                            avg_normal = np.array([0.0, 1.0, 0.0])
                     
                     # RELAXED criteria for window detection
                     max_dim = np.max(size)
@@ -652,8 +676,26 @@ class GLBImporter(BaseImporter):
                 max_center = np.max(cell_centers, axis=0)
                 size = max_center - min_center
                 
-                weighted_normal = np.average(cell_normals, axis=0, weights=cell_areas)
-                avg_normal = weighted_normal / np.linalg.norm(weighted_normal)
+                # Calculate average normal (handle zero weights)
+                total_area = np.sum(cell_areas)
+                if total_area > 1e-10:  # Check if weights sum to non-zero
+                    weighted_normal = np.average(cell_normals, axis=0, weights=cell_areas)
+                else:
+                    # Fallback to unweighted average if all areas are zero
+                    weighted_normal = np.mean(cell_normals, axis=0)
+                
+                norm = np.linalg.norm(weighted_normal)
+                if norm > 1e-10:
+                    avg_normal = weighted_normal / norm
+                else:
+                    # Fallback to first normal if weighted normal is zero
+                    avg_normal = cell_normals[0] if len(cell_normals) > 0 else np.array([0.0, 1.0, 0.0])
+                    norm_fallback = np.linalg.norm(avg_normal)
+                    if norm_fallback > 1e-10:
+                        avg_normal = avg_normal / norm_fallback
+                    else:
+                        # Final fallback to default normal
+                        avg_normal = np.array([0.0, 1.0, 0.0])
                 
                 max_dim = np.max(size)
                 min_dim = np.min(size[size > 0.01]) if len(size[size > 0.01]) > 0 else max_dim
@@ -763,8 +805,22 @@ class GLBImporter(BaseImporter):
                 
                 merged['faces'] = list(merged_faces)
                 merged['center'] = np.mean(merged_centers, axis=0)
-                weighted_normal = np.average(merged_normals, axis=0, weights=merged_areas)
-                merged['normal'] = weighted_normal / np.linalg.norm(weighted_normal)
+                
+                # Calculate average normal (handle zero weights)
+                total_area = np.sum(merged_areas)
+                if total_area > 1e-10:  # Check if weights sum to non-zero
+                    weighted_normal = np.average(merged_normals, axis=0, weights=merged_areas)
+                else:
+                    # Fallback to unweighted average if all areas are zero
+                    weighted_normal = np.mean(merged_normals, axis=0)
+                
+                norm = np.linalg.norm(weighted_normal)
+                if norm > 1e-10:
+                    merged['normal'] = weighted_normal / norm
+                else:
+                    # Fallback to first normal if weighted normal is zero
+                    merged['normal'] = merged_normals[0] if len(merged_normals) > 0 else np.array([0.0, 1.0, 0.0])
+                    merged['normal'] = merged['normal'] / np.linalg.norm(merged['normal'])
                 min_center = np.min(merged_centers, axis=0)
                 max_center = np.max(merged_centers, axis=0)
                 merged['size'] = max_center - min_center
@@ -1852,15 +1908,32 @@ class GLBImporter(BaseImporter):
             # Average normal (weighted by face area)
             face_areas = mesh.area_faces
             if len(face_areas) > 0:
-                weighted_normal = np.average(face_normals, axis=0, weights=face_areas)
-                normal = tuple(weighted_normal / np.linalg.norm(weighted_normal))
+                # Check if weights sum to non-zero before using weighted average
+                total_area = np.sum(face_areas)
+                if total_area > 1e-10:  # Check if weights sum to non-zero
+                    weighted_normal = np.average(face_normals, axis=0, weights=face_areas)
+                else:
+                    # Fallback to unweighted average if all areas are zero
+                    weighted_normal = np.mean(face_normals, axis=0)
+                
+                norm = np.linalg.norm(weighted_normal)
+                if norm > 1e-10:
+                    normal = tuple(weighted_normal / norm)
+                else:
+                    # Fallback to first face normal if weighted normal is zero
+                    normal = tuple(face_normals[0] if len(face_normals) > 0 else (0.0, 1.0, 0.0))
             else:
                 normal = tuple(face_normals[0] if len(face_normals) > 0 else (0.0, 1.0, 0.0))
         else:
             normal = (0.0, 1.0, 0.0)
         
         # Ensure normal is unit vector
-        normal = tuple(np.array(normal) / np.linalg.norm(normal))
+        normal_array = np.array(normal)
+        norm = np.linalg.norm(normal_array)
+        if norm > 1e-10:
+            normal = tuple(normal_array / norm)
+        else:
+            normal = (0.0, 1.0, 0.0)
         
         window = Window(
             id=window_id,
@@ -2028,7 +2101,12 @@ class GLBImporter(BaseImporter):
             # Check normal consistency (windows have consistent normals)
             # Calculate average normal
             avg_normal = np.mean(triangle_normals, axis=0)
-            avg_normal = avg_normal / np.linalg.norm(avg_normal)
+            norm = np.linalg.norm(avg_normal)
+            if norm > 1e-10:
+                avg_normal = avg_normal / norm
+            else:
+                # Fallback to default normal if average is zero
+                avg_normal = np.array([0.0, 1.0, 0.0])
             
             # Calculate normal variance (low variance = consistent normals = window-like)
             normal_dots = np.abs(np.dot(triangle_normals, avg_normal))
