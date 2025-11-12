@@ -821,12 +821,10 @@ if PYQT6_AVAILABLE:
                 self.glb_viewer_widget.set_building(self.building)
                 logger.debug(f"Building set in 3D viewer for highlighting")
             
-            # Highlight the object in 3D viewer (without switching tabs automatically)
-            # User can manually switch to 3D viewer tab to see the highlight
-            # If a window is selected, highlight it in the 3D viewer
+            # If a window is selected, highlight it (Trimesh viewer will update if open)
             if isinstance(selected_object, Window):
-                logger.info(f"Window selected: {selected_object.id} - highlighting in blue")
-                # Highlight the selected window
+                logger.info(f"Window selected: {selected_object.id} - highlighting")
+                # Highlight the selected window (this will update Trimesh viewer if it's open)
                 self.glb_viewer_widget.highlight_window(selected_object)
                 logger.info(f"Highlight request sent for window: {selected_object.id}")
             elif isinstance(selected_object, Building):

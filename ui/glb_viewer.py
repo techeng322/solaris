@@ -742,6 +742,10 @@ else:
         def __init__(self, parent=None):
             super().__init__(parent)
             self.mesh = None
+            self.building = None  # Store building for window highlighting
+            self.highlighted_window = None  # Currently highlighted window
+            self.window_meshes = {}  # Cache of window geometry meshes
+            self.trimesh_viewer_open = False  # Track if Trimesh viewer is open
             self.init_ui()
         
         def init_ui(self):
@@ -821,15 +825,187 @@ else:
                 self.view_button.setEnabled(False)
         
         def set_building(self, building):
-            """Set building data for window highlighting (not available without OpenGL)."""
-            pass  # Window highlighting requires OpenGL
+            """Set building data for window highlighting."""
+            self.building = building
+            self.window_meshes = {}  # Clear cache when building changes
         
         def highlight_window(self, window):
-            """Highlight a specific window (not available without OpenGL)."""
-            pass  # Window highlighting requires OpenGL
+            """Highlight a specific window in Trimesh viewer."""
+            import logging
+            logger = logging.getLogger(__name__)
+            
+            if window is None:
+                self.highlighted_window = None
+                logger.info("Window highlight cleared for Trimesh viewer")
+                # Update viewer if it's open
+                if self.trimesh_viewer_open:
+                    self._update_trimesh_viewer()
+                return
+            
+            # Check if object has required attributes
+            if not hasattr(window, 'id'):
+                logger.warning(f"Object {type(window)} does not have 'id' attribute - cannot highlight")
+                return
+            
+            logger.info(f"Window highlighted for Trimesh viewer: {window.id}")
+            self.highlighted_window = window
+            
+            # Generate window mesh if not cached
+            if window.id not in self.window_meshes:
+                window_mesh = self._create_window_mesh(window)
+                self.window_meshes[window.id] = window_mesh
+                if window_mesh is None:
+                    logger.warning(f"Failed to create mesh for window {window.id}")
+                else:
+                    logger.info(f"Created mesh for window {window.id} with {len(window_mesh.vertices)} vertices")
+            
+            # Update viewer if it's open
+            if self.trimesh_viewer_open:
+                self._update_trimesh_viewer()
+        
+        def _update_trimesh_viewer(self):
+            """Update the Trimesh viewer with current highlighted window (close and reopen)."""
+            import logging
+            logger = logging.getLogger(__name__)
+            
+            if self.mesh is None:
+                return
+            
+            try:
+                # Close any existing pyglet windows
+                try:
+                    import pyglet
+                    # Close all pyglet windows
+                    for window in pyglet.app.windows:
+                        window.close()
+                except Exception as e:
+                    logger.debug(f"Could not close existing pyglet windows: {e}")
+                
+                # Create updated scene and show it
+                scene = self._create_trimesh_scene()
+                scene.show()
+                logger.info("Trimesh viewer updated with highlighted window")
+            except Exception as e:
+                logger.warning(f"Could not update Trimesh viewer: {e}")
+        
+        def _create_window_mesh(self, window):
+            """Create a trimesh representation of a window from its properties."""
+            import trimesh
+            import numpy as np
+            import logging
+            
+            logger = logging.getLogger(__name__)
+            
+            # Validate window properties
+            if not hasattr(window, 'center') or window.center is None:
+                logger.warning(f"Window {getattr(window, 'id', 'unknown')} missing center property")
+                return None
+            if not hasattr(window, 'normal') or window.normal is None:
+                logger.warning(f"Window {getattr(window, 'id', 'unknown')} missing normal property")
+                return None
+            if not hasattr(window, 'size') or window.size is None or len(window.size) < 2:
+                logger.warning(f"Window {getattr(window, 'id', 'unknown')} missing or invalid size property")
+                return None
+            
+            # Window properties
+            center = np.array(window.center)
+            normal = np.array(window.normal)
+            width, height = window.size
+            
+            # Validate size values
+            if width <= 0 or height <= 0:
+                logger.warning(f"Window {window.id} has invalid size: {width}x{height}")
+                return None
+            
+            # Normalize normal vector
+            normal_norm = np.linalg.norm(normal)
+            if normal_norm < 1e-6:
+                logger.warning(f"Window {window.id} has zero-length normal vector")
+                return None
+            normal = normal / normal_norm
+            
+            # Find two perpendicular vectors to the normal
+            if abs(normal[2]) < 0.9:
+                up_ref = np.array([0, 0, 1])
+            else:
+                up_ref = np.array([0, 1, 0])
+            
+            # Calculate right and up vectors for the window plane
+            right = np.cross(normal, up_ref)
+            right_norm = np.linalg.norm(right)
+            if right_norm < 1e-6:
+                if abs(normal[0]) < 0.9:
+                    up_ref = np.array([1, 0, 0])
+                else:
+                    up_ref = np.array([0, 1, 0])
+                right = np.cross(normal, up_ref)
+                right_norm = np.linalg.norm(right)
+            
+            if right_norm > 1e-6:
+                right = right / right_norm
+            else:
+                right = np.array([1, 0, 0]) if abs(normal[0]) < 0.9 else np.array([0, 1, 0])
+            
+            up = np.cross(right, normal)
+            up_norm = np.linalg.norm(up)
+            if up_norm > 1e-6:
+                up = up / up_norm
+            else:
+                up = np.array([0, 0, 1]) if abs(normal[2]) < 0.9 else np.array([0, 1, 0])
+            
+            # Create rectangle vertices
+            half_width = width / 2.0
+            half_height = height / 2.0
+            
+            corners = [
+                center + (-half_width * right) + (-half_height * up),
+                center + (half_width * right) + (-half_height * up),
+                center + (half_width * right) + (half_height * up),
+                center + (-half_width * right) + (half_height * up)
+            ]
+            
+            # Create two triangles
+            vertices = np.array(corners)
+            faces = np.array([
+                [0, 1, 2],
+                [0, 2, 3]
+            ])
+            
+            # Create trimesh
+            window_mesh = trimesh.Trimesh(vertices=vertices, faces=faces)
+            return window_mesh
+        
+        def _create_trimesh_scene(self):
+            """Create a trimesh scene with main mesh and highlighted window (if any)."""
+            import trimesh
+            import logging
+            logger = logging.getLogger(__name__)
+            
+            # Create scene
+            scene = trimesh.Scene()
+            
+            # Add main mesh to scene
+            scene.add_geometry(self.mesh, node_name='building')
+            
+            # Add highlighted window mesh if available
+            if self.highlighted_window is not None:
+                window_mesh = self.window_meshes.get(self.highlighted_window.id)
+                if window_mesh is not None:
+                    # Color the window mesh blue/cyan for highlighting
+                    try:
+                        window_mesh.visual.face_colors = [0, 128, 255, 200]  # Blue with transparency
+                        scene.add_geometry(window_mesh, node_name=f'window_{self.highlighted_window.id}')
+                        logger.info(f"Added highlighted window {self.highlighted_window.id} to Trimesh scene")
+                    except Exception as e:
+                        logger.warning(f"Could not color window mesh: {e}, showing without color")
+                        scene.add_geometry(window_mesh, node_name=f'window_{self.highlighted_window.id}')
+                else:
+                    logger.warning(f"Window mesh not available for {self.highlighted_window.id}")
+            
+            return scene
         
         def launch_trimesh_viewer(self):
-            """Launch trimesh's built-in viewer."""
+            """Launch trimesh's built-in viewer with optional window highlighting."""
             if self.mesh is not None:
                 try:
                     # Check if pyglet is available
@@ -848,10 +1024,16 @@ else:
                         )
                         return
                     
+                    # Create scene with main mesh and highlighted window (if any)
+                    scene = self._create_trimesh_scene()
+                    
+                    # Mark viewer as open
+                    self.trimesh_viewer_open = True
+                    
                     # Try to launch viewer (must be in main thread for pyglet)
                     # Note: This may block the UI, but pyglet requires main thread
                     try:
-                        self.mesh.show()
+                        scene.show()
                     except RuntimeError as e:
                         error_msg = str(e)
                         if "EventLoop.run()" in error_msg or "thread" in error_msg.lower():
