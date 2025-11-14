@@ -732,7 +732,11 @@ if PYQT6_AVAILABLE:
             
             # Update object tree viewer widget if it exists
             if self.object_tree_viewer_widget:
-                self.object_tree_viewer_widget.set_building(building)
+                # Pass importer to tree viewer so it can display IFC elements
+                importer = None
+                if hasattr(self.import_worker, 'importer'):
+                    importer = self.import_worker.importer
+                self.object_tree_viewer_widget.set_building(building, importer=importer)
                 # Connect object tree selection to 3D viewer highlighting (only once)
                 if not self.object_tree_connected:
                     self.object_tree_viewer_widget.item_selected.connect(self.on_object_tree_selection)

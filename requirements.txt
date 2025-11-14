@@ -28,6 +28,9 @@ pillow>=10.0.0
 # BIM/IFC support
 ifcopenshell>=0.7.0
 
+# REVIT API support (optional - requires REVIT installation)
+pythonnet>=3.0.0
+
 # Date/time calculations for sun position
 astral>=3.2
 pytz>=2023.3
