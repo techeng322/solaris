@@ -28,6 +28,10 @@ pillow>=10.0.0
 # BIM/IFC support
 ifcopenshell>=0.7.0
 
+# REVIT headless support (optional - for direct .rvt file import)
+# pythonnet>=3.0.0  # Uncomment if you want to use headless REVIT import
+# Note: Requires REVIT to be installed (for API DLLs), but REVIT UI doesn't need to run
+
 # Date/time calculations for sun position
 astral>=3.2
 pytz>=2023.3

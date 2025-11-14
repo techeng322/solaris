@@ -42,34 +42,59 @@ class RevitImporter(BaseImporter):
     
     def _import_rvt_direct(self) -> List[Building]:
         """
-        Import REVIT file directly.
-        Note: Direct RVT import requires REVIT API or third-party libraries.
-        For now, this is a placeholder that would need REVIT API integration.
+        Import REVIT file directly using headless REVIT API.
+        Works without REVIT UI - uses REVIT API DLLs directly via Python.NET.
         
         Returns:
             List of Building objects
         """
-        # TODO: Implement direct REVIT import
-        # This would require:
-        # 1. REVIT API access (Autodesk.Revit.dll)
-        # 2. Or use of third-party libraries like pyrevit
-        # 3. Or conversion to IFC first
-        
-        raise NotImplementedError(
-            "Direct REVIT import requires REVIT API. "
-            "Please export REVIT model to IFC format first."
-        )
+        try:
+            from .revit_headless import RevitHeadlessExtractor
+            
+            # Use headless extractor
+            with RevitHeadlessExtractor(self.file_path) as extractor:
+                building = extractor.extract_building()
+                return [building]
+                
+        except NotImplementedError as e:
+            # REVIT API not available - provide helpful error message
+            raise NotImplementedError(
+                f"{str(e)}\n\n"
+                "Alternative: Export REVIT model to IFC format and import IFC file instead."
+            )
+        except Exception as e:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.error(f"Error importing REVIT file directly: {e}", exc_info=True)
+            raise RuntimeError(
+                f"Failed to import REVIT file: {str(e)}\n\n"
+                "Please ensure:\n"
+                "1. REVIT is installed (required for API DLLs)\n"
+                "2. Python.NET is installed: pip install pythonnet\n"
+                "3. File is a valid .rvt file\n\n"
+                "Alternative: Export REVIT model to IFC format and import IFC file."
+            )
     
     def extract_windows(self) -> List[Window]:
         """
         Extract all windows from REVIT model.
         Uses IFC importer if file is IFC format.
+        Uses headless REVIT extractor if file is .rvt format.
         """
         if self.file_extension == '.ifc':
             ifc_importer = IFCImporter(self.file_path)
             return ifc_importer.extract_windows()
+        elif self.file_extension == '.rvt':
+            try:
+                from .revit_headless import RevitHeadlessExtractor
+                with RevitHeadlessExtractor(self.file_path) as extractor:
+                    return extractor.extract_windows()
+            except Exception as e:
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.error(f"Error extracting windows from REVIT: {e}")
+                return []
         else:
-            # Direct REVIT import - not implemented yet
             return []
     
     def recognize_window_type(self, window_element) -> Dict:

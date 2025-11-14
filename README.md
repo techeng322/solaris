@@ -7,6 +7,7 @@ A comprehensive GUI application for calculating insolation duration and natural 
 - **Insolation Calculations**: Compliant with GOST R 57795-2017 and SanPiN 1.2.3685-21
 - **KEO Calculations**: Compliant with SP 52.13330.2016 and SP 367.1325800.2017
 - **BIM Integration**: Import models from IFC, RVT, and GLB formats
+- **REVIT Plugin**: Direct REVIT integration via pyRevit plugin (no export needed!)
 - **Modern GUI**: Professional PyQt6 interface with bilingual support (English/Russian)
 - **Offline Operation**: Full functionality without internet connection
 - **Accurate Calculations**: Precise second-level accuracy for insolation requirements
@@ -53,6 +54,15 @@ python run_gui.py
 4. **Export Report**: Click "Export Report" to generate PDF/HTML reports with diagrams
 5. **3D Viewer**: Click "Show 3D Viewer" to visualize the building model
 6. **Logs Viewer**: Click "Show Logs Viewer" to see detailed calculation logs
+
+### Using the REVIT Plugin
+
+1. **Install pyRevit** (see `revit_plugin/INSTALLATION.md`)
+2. **Open REVIT model** with windows
+3. **Go to pyRevit tab** → **Solaris** section
+4. **Click calculation button** (Insolation, KEO, or Both)
+5. **View results** in pyRevit output window
+6. **Non-compliant windows** are automatically highlighted in REVIT
 
 ### Configuration
 

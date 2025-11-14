@@ -10,22 +10,27 @@ import yaml
 
 from models.calculation_result import BuildingCalculationResult, RoomCalculationResult
 from models.building import Building
+from .report_enhancements import ReportSettings, ReportTextEditor, PlanOrganizer
 
 
 class ReportGenerator:
     """Generates formatted reports from calculation results."""
     
-    def __init__(self, config_path: Optional[str] = None):
+    def __init__(self, config_path: Optional[str] = None, report_settings: Optional[ReportSettings] = None):
         """
         Initialize report generator.
         
         Args:
             config_path: Path to configuration file
+            report_settings: Optional report settings (plan selection, scales, etc.)
         """
         self.config = self._load_config(config_path)
         self.output_format = self.config.get('reports', {}).get('format', 'pdf')
         self.include_diagrams = self.config.get('reports', {}).get('include_diagrams', True)
         self.include_stamps = self.config.get('reports', {}).get('include_stamps', True)
+        self.report_settings = report_settings or ReportSettings()
+        self.text_editor = ReportTextEditor()
+        self.plan_organizer = PlanOrganizer()
     
     def _load_config(self, config_path: Optional[str]) -> Dict:
         """Load configuration from file."""
@@ -139,11 +144,14 @@ class ReportGenerator:
         elements.append(Paragraph(summary_text, styles['Normal']))
         elements.append(Spacer(1, 20))
         
-        # Room results
+        # Room results - organized by floor
         elements.append(Paragraph("<b>Результаты по помещениям:</b>", styles['Heading2']))
         elements.append(Spacer(1, 12))
         
-        for room_result in building_result.room_results:
+        # Organize room results by floor (prevent chaotic sequence)
+        room_results_organized = self._organize_room_results(building_result.room_results)
+        
+        for room_result in room_results_organized:
             # Room header
             room_header = f"Помещение: {room_result.room_name} (ID: {room_result.room_id})"
             elements.append(Paragraph(room_header, styles['Heading3']))
@@ -182,10 +190,67 @@ class ReportGenerator:
             elements.append(Spacer(1, 20))
             elements.append(PageBreak())
         
+        # Add custom text sections if edited
+        if self.text_editor.custom_texts:
+            elements.append(PageBreak())
+            elements.append(Paragraph("<b>Дополнительная информация:</b>", styles['Heading2']))
+            for section, text in self.text_editor.custom_texts.items():
+                elements.append(Paragraph(f"<b>{section}:</b><br/>{text}", styles['Normal']))
+                elements.append(Spacer(1, 12))
+        
+        # Add stamps if enabled
+        if self.include_stamps and self.text_editor.get_all_stamps():
+            elements.append(PageBreak())
+            elements.append(Paragraph("<b>Подписи и печати:</b>", styles['Heading2']))
+            elements.append(Spacer(1, 12))
+            # Add stamp placeholders (can be filled with images)
+            for stamp_type, stamp_data in self.text_editor.get_all_stamps().items():
+                stamp_text = f"<b>{stamp_type}:</b><br/>"
+                if 'name' in stamp_data:
+                    stamp_text += f"Имя: {stamp_data['name']}<br/>"
+                if 'date' in stamp_data:
+                    stamp_text += f"Дата: {stamp_data['date']}<br/>"
+                elements.append(Paragraph(stamp_text, styles['Normal']))
+                elements.append(Spacer(1, 20))
+        
         # Build PDF
         doc.build(elements)
         
         return output_path
+    
+    def _organize_room_results(self, room_results: List[RoomCalculationResult]) -> List[RoomCalculationResult]:
+        """
+        Organize room results by floor to prevent chaotic sequence.
+        
+        Args:
+            room_results: List of room results
+        
+        Returns:
+            Organized list (sorted by floor, then room ID)
+        """
+        # Extract floor numbers from room IDs or use default
+        def get_floor_number(room_result: RoomCalculationResult) -> int:
+            # Try to extract from room_id or use 0 as default
+            try:
+                # Common patterns: "Room_1F_1", "Floor1_Room1", etc.
+                room_id_lower = room_result.room_id.lower()
+                if 'floor' in room_id_lower or 'f' in room_id_lower:
+                    # Extract number after 'floor' or 'f'
+                    import re
+                    match = re.search(r'(?:floor|f)[\s_-]*(\d+)', room_id_lower)
+                    if match:
+                        return int(match.group(1))
+            except:
+                pass
+            return 0
+        
+        # Sort by floor number, then by room ID
+        sorted_results = sorted(
+            room_results,
+            key=lambda r: (get_floor_number(r), r.room_id)
+        )
+        
+        return sorted_results
     
     def _generate_html_report(
         self,

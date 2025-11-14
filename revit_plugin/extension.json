@@ -1,0 +1,41 @@
+{
+  "name": "Solaris",
+  "description": "Insolation and KEO calculations for REVIT models",
+  "author": "Solaris Team",
+  "version": "1.0.0",
+  "min_revit": "2019",
+  "max_revit": "2025",
+  "dependencies": [
+    "numpy",
+    "scipy",
+    "shapely",
+    "trimesh",
+    "astral",
+    "pytz",
+    "pyyaml"
+  ],
+  "commands": [
+    {
+      "name": "Calculate Insolation",
+      "script": "commands.calculate_insolation",
+      "function": "calculate_insolation_command",
+      "icon": "icons/insolation.png",
+      "tooltip": "Calculate insolation duration for windows"
+    },
+    {
+      "name": "Calculate KEO",
+      "script": "commands.calculate_keo",
+      "function": "calculate_keo_command",
+      "icon": "icons/keo.png",
+      "tooltip": "Calculate KEO (natural illumination) for windows"
+    },
+    {
+      "name": "Calculate Both",
+      "script": "commands.calculate_both",
+      "function": "calculate_both_command",
+      "icon": "icons/both.png",
+      "tooltip": "Calculate both insolation and KEO"
+    }
+  ]
+}
+

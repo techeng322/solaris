@@ -891,33 +891,79 @@ if PYQT6_AVAILABLE:
                     self.results_table.setColumnWidth(col, min_width)
         
         def export_report(self):
-            """Export calculation report."""
-            t = Translations
+            """Export calculation results to report with settings dialog."""
             if not self.calculation_result:
-                QMessageBox.warning(self, t.WARNING, t.NO_RESULTS)
+                from PyQt6.QtWidgets import QMessageBox
+                QMessageBox.warning(
+                    self,
+                    "No Results / Нет результатов",
+                    "Please calculate first / Пожалуйста, сначала выполните расчет"
+                )
                 return
             
-            file_path, _ = QFileDialog.getSaveFileName(
-                self,
-                t.EXPORT_REPORT,
-                "report.pdf",
-                "PDF Files (*.pdf);;HTML Files (*.html)"
-            )
+            # Show report settings dialog
+            from ui.report_settings_dialog import ReportSettingsDialog
             
-            if file_path:
-                try:
-                    from reports import ReportGenerator
-                    report_gen = ReportGenerator()
-                    output_path = report_gen.generate_report(
-                        self.calculation_result,
-                        file_path,
-                        self.building
-                    )
-                    self.log(f"{t.REPORT_SAVED}: {output_path}")
-                    QMessageBox.information(self, t.SUCCESS, f"{t.REPORT_SAVED}:\n{output_path}")
-                except Exception as e:
-                    self.log(f"{t.FAILED_TO_SAVE}: {e}")
-                    QMessageBox.critical(self, t.ERROR, f"{t.FAILED_TO_SAVE}:\n{e}")
+            # Get available plans (room IDs)
+            available_plans = []
+            if self.calculation_result and self.calculation_result.room_results:
+                available_plans = [r.room_id for r in self.calculation_result.room_results]
+            
+            dialog = ReportSettingsDialog(self, available_plans=available_plans)
+            
+            from PyQt6.QtWidgets import QDialog
+            if dialog.exec() == QDialog.DialogCode.Accepted:
+                # Get settings from dialog
+                report_settings = dialog.get_report_settings()
+                text_editor = dialog.get_text_editor()
+                
+                # Get output file path
+                from PyQt6.QtWidgets import QFileDialog
+                file_path, _ = QFileDialog.getSaveFileName(
+                    self,
+                    "Save Report / Сохранить отчет",
+                    "",
+                    "PDF Files (*.pdf);;HTML Files (*.html);;DOCX Files (*.docx)"
+                )
+                
+                if file_path:
+                    try:
+                        from reports.report_generator import ReportGenerator
+                        
+                        # Create report generator with settings
+                        generator = ReportGenerator(
+                            config_path='config.yaml',
+                            report_settings=report_settings
+                        )
+                        generator.text_editor = text_editor
+                        
+                        # Generate report
+                        self.log(f"Generating report / Генерация отчета: {file_path}")
+                        output_path = generator.generate_report(
+                            self.calculation_result,
+                            file_path,
+                            self.building
+                        )
+                        
+                        self.log(f"Report saved / Отчет сохранен: {output_path}")
+                        
+                        from PyQt6.QtWidgets import QMessageBox
+                        QMessageBox.information(
+                            self,
+                            "Success / Успех",
+                            f"Report saved / Отчет сохранен:\n{output_path}"
+                        )
+                    except Exception as e:
+                        self.log(f"Error generating report / Ошибка генерации отчета: {e}")
+                        import traceback
+                        self.log(traceback.format_exc())
+                        
+                        from PyQt6.QtWidgets import QMessageBox
+                        QMessageBox.critical(
+                            self,
+                            "Error / Ошибка",
+                            f"Error generating report / Ошибка генерации отчета:\n{str(e)}"
+                        )
         
         def log(self, message: str):
             """Add message to log."""

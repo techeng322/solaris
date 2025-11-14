@@ -106,13 +106,18 @@ class InsolationCalculator:
             current_time += self.time_step
         
         # Convert to timedelta
-        duration = timedelta(seconds=total_insolation_seconds)
+        # Use exact seconds (no rounding) to ensure accuracy
+        duration = timedelta(seconds=int(total_insolation_seconds))
         
         # Check if requirement is met
+        # CRITICAL: Use exact second-level comparison to avoid Altec-style overstatement
+        # If required is 1:30 (5400 seconds), we must get >= 5400, not 5399
         meets_requirement = True
         if required_duration:
-            # Compare with second-level precision
-            meets_requirement = total_insolation_seconds >= required_duration.total_seconds()
+            required_seconds = required_duration.total_seconds()
+            # Exact comparison: must be >= required (not > required - 1)
+            # This ensures 1:30 requirement is met with exactly 1:30 or more
+            meets_requirement = total_insolation_seconds >= required_seconds
         
         return {
             'duration': duration,

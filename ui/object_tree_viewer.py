@@ -149,10 +149,24 @@ class ObjectTreeViewerWidget(QWidget):
         if self.building is None:
             return
         
-        # Create building root item
+        # Create building root item with BIM metadata
         building_item = QTreeWidgetItem(self.tree)
-        building_item.setText(0, f"BUILDING {self.building.id}")
-        building_item.setText(1, f"{len(self.building.windows)} windows")
+        building_name = self.building.name or f"BUILDING {self.building.id}"
+        building_item.setText(0, building_name)
+        
+        # Build building details with BIM properties
+        building_details = [f"{len(self.building.windows)} windows"]
+        if self.building.location:
+            building_details.append(f"Location: {self.building.location[0]:.4f}, {self.building.location[1]:.4f}")
+        if self.building.properties:
+            # Show key BIM properties
+            for key in ['BuildingType', 'Address', 'ProjectName', 'IfcSchema']:
+                if key in self.building.properties:
+                    value = self.building.properties[key]
+                    if isinstance(value, str) and len(value) < 40:
+                        building_details.append(f"{key}: {value}")
+        
+        building_item.setText(1, " | ".join(building_details[:3]))  # Show first 3 details
         building_item.setData(0, Qt.ItemDataRole.UserRole, self.building)
         building_item.setExpanded(True)
         # Make item selectable
@@ -163,6 +177,7 @@ class ObjectTreeViewerWidget(QWidget):
             window_item = QTreeWidgetItem(building_item)
             window_item.setText(0, f"Window {window.id}")
             
+            # Build window details with BIM properties
             window_details = []
             if window.size:
                 area = window.get_area()
@@ -170,6 +185,20 @@ class ObjectTreeViewerWidget(QWidget):
                 window_details.append(f"Size: {window.size[0]:.2f}×{window.size[1]:.2f} m")
             if window.window_type:
                 window_details.append(f"Type: {window.window_type}")
+            
+            # Add BIM properties if available
+            if window.properties:
+                bim_props = []
+                # Show key BIM properties
+                for key in ['OverallWidth', 'OverallHeight', 'Material', 'IfcType', 'GlobalId']:
+                    if key in window.properties:
+                        value = window.properties[key]
+                        if isinstance(value, (int, float)):
+                            bim_props.append(f"{key}: {value}")
+                        elif isinstance(value, str) and len(value) < 30:
+                            bim_props.append(f"{key}: {value}")
+                if bim_props:
+                    window_details.extend(bim_props[:3])  # Show first 3 BIM properties
             
             window_item.setText(1, ", ".join(window_details) if window_details else "")
             window_item.setData(0, Qt.ItemDataRole.UserRole, window)

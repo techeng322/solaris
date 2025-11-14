@@ -164,11 +164,15 @@ class GLBImporter(BaseImporter):
         
         logger.info(f"Total windows extracted: {len(all_windows)}")
         
-        # Add all windows directly to building (no rooms)
-        for window in all_windows:
+        # Filter out non-window elements (stairs, walls, doors, etc.)
+        filtered_windows = self._filter_non_window_elements(all_windows)
+        logger.info(f"After filtering non-window elements: {len(filtered_windows)} window(s) remain")
+        
+        # Add filtered windows directly to building (no rooms)
+        for window in filtered_windows:
             building.add_window(window)
         
-        logger.info(f"Added {len(all_windows)} window(s) directly to building")
+        logger.info(f"Added {len(filtered_windows)} window(s) directly to building")
         
         return building
     
@@ -266,16 +270,22 @@ class GLBImporter(BaseImporter):
         if not self.scene or not isinstance(self.scene, trimesh.Scene):
             return windows
         
-        # Window name patterns (Russian and English)
+        # Window name patterns (Russian and English) - STRICT patterns only
+        # Only match names that clearly indicate windows
         window_patterns = [
-            'витраж',  # stained glass/window
-            'окно',    # window
-            'window',
-            'win',
-            'оп-',     # ОП-24, ОП-15 (window types)
-            'в-',      # В-2 (window type)
-            'glazing',
-            'glass'
+            'окно',    # window (Russian)
+            'window',  # window (English)
+            'win',     # window abbreviation
+            'оп-',     # ОП-24, ОП-15 (window types in Russian standards)
+            'в-',      # В-2 (window type in Russian standards)
+            'glazing', # glazing
+        ]
+        
+        # Exclude patterns - if these appear, it's NOT a window
+        exclude_patterns = [
+            'stair', 'лестниц', 'wall', 'стен', 'door', 'двер',
+            'column', 'колонн', 'floor', 'пол', 'ceiling', 'потолок',
+            'roof', 'крыш', 'furniture', 'мебель', 'equipment', 'оборудован'
         ]
         
         logger.info(f"Scanning {len(self.scene.geometry)} geometry object(s) for windows...")
@@ -287,7 +297,18 @@ class GLBImporter(BaseImporter):
             
             key_str = str(key).lower()
             
-            # Check if geometry name suggests it's a window
+            # First check: exclude if it matches non-window patterns
+            is_excluded = False
+            for exclude_pattern in exclude_patterns:
+                if exclude_pattern in key_str:
+                    is_excluded = True
+                    logger.debug(f"Excluding geometry '{key}' (matches exclude pattern: {exclude_pattern})")
+                    break
+            
+            if is_excluded:
+                continue
+            
+            # Second check: only include if it matches window patterns
             is_window_geometry = False
             for pattern in window_patterns:
                 if pattern in key_str:
@@ -310,12 +331,20 @@ class GLBImporter(BaseImporter):
     def _extract_windows_from_all_geometries(self) -> List[Window]:
         """
         Scan ALL geometries (not just named ones) for window-like shapes.
-        Uses relaxed geometric criteria to find windows that might not have window-related names.
+        Uses STRICT geometric criteria to find windows - only includes elements that are clearly windows.
         """
         windows = []
         
         if not self.scene or not isinstance(self.scene, trimesh.Scene):
             return windows
+        
+        # Exclude patterns - if geometry name contains these, skip it
+        exclude_patterns = [
+            'stair', 'лестниц', 'wall', 'стен', 'door', 'двер',
+            'column', 'колонн', 'floor', 'пол', 'ceiling', 'потолок',
+            'roof', 'крыш', 'furniture', 'мебель', 'equipment', 'оборудован',
+            'beam', 'балк', 'foundation', 'фундамент', 'railing', 'перил'
+        ]
         
         logger.info(f"Scanning ALL {len(self.scene.geometry)} geometries for window-like shapes...")
         
@@ -325,6 +354,18 @@ class GLBImporter(BaseImporter):
                 continue
             
             if len(geometry.vertices) == 0:
+                continue
+            
+            # First check: exclude if name contains non-window patterns
+            key_str = str(key).lower()
+            is_excluded = False
+            for exclude_pattern in exclude_patterns:
+                if exclude_pattern in key_str:
+                    is_excluded = True
+                    logger.debug(f"Excluding geometry '{key}' from window detection (matches exclude pattern: {exclude_pattern})")
+                    break
+            
+            if is_excluded:
                 continue
             
             # Analyze geometry for window-like characteristics
@@ -2427,3 +2468,68 @@ class GLBImporter(BaseImporter):
         """
         # Windows are extracted during room creation
         return []
+    
+    def _filter_non_window_elements(self, windows: List[Window]) -> List[Window]:
+        """
+        Filter out non-window elements (stairs, walls, doors, etc.) from window list.
+        Only keeps elements that are clearly windows based on name and properties.
+        
+        Args:
+            windows: List of Window objects (may include non-window elements)
+        
+        Returns:
+            Filtered list containing only actual windows
+        """
+        filtered = []
+        
+        # Non-window name patterns (Russian and English)
+        exclude_patterns = [
+            # Stairs
+            'stair', 'лестниц', 'ladder', 'step',
+            # Walls
+            'wall', 'стен', 'перегородк', 'partition',
+            # Doors
+            'door', 'двер', 'entrance', 'exit',
+            # Columns
+            'column', 'колонн', 'pillar', 'post',
+            # Floors/ceilings
+            'floor', 'пол', 'ceiling', 'потолок', 'slab',
+            # Roof
+            'roof', 'крыш', 'rooftop',
+            # Furniture
+            'furniture', 'мебель', 'table', 'chair', 'стол', 'стул',
+            # Equipment
+            'equipment', 'оборудован', 'mechanical',
+            # Other building elements
+            'beam', 'балк', 'girder', 'брус',
+            'foundation', 'фундамент',
+            'railing', 'перил', 'handrail',
+            'curtain', 'занавес', 'blind',
+        ]
+        
+        for window in windows:
+            window_id_lower = window.id.lower()
+            
+            # Check if window ID contains exclude patterns
+            should_exclude = False
+            for pattern in exclude_patterns:
+                if pattern in window_id_lower:
+                    should_exclude = True
+                    logger.debug(f"Excluding non-window element: {window.id} (matches pattern: {pattern})")
+                    break
+            
+            # Additional checks: window must have reasonable window-like properties
+            if not should_exclude:
+                # Check size - windows should be reasonable size
+                if window.size:
+                    width, height = window.size
+                    # Windows typically: 0.5m - 3m width, 0.8m - 2.5m height
+                    if width < 0.3 or width > 5.0 or height < 0.3 or height > 4.0:
+                        should_exclude = True
+                        logger.debug(f"Excluding element with unreasonable size: {window.id} (size: {width}x{height})")
+            
+            if not should_exclude:
+                filtered.append(window)
+                logger.debug(f"Including window: {window.id}")
+        
+        return filtered

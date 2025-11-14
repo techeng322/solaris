@@ -1,5 +1,6 @@
 """
 Diagram generator for visualization of calculation results.
+Enhanced with overlapping point prevention and organized layouts.
 """
 
 from typing import List, Dict, Tuple, Optional
@@ -10,19 +11,23 @@ import numpy as np
 
 from models.calculation_result import BuildingCalculationResult, RoomCalculationResult
 from models.building import Room, Window
+from .report_enhancements import ReportLayoutManager, PlanOrganizer
 
 
 class DiagramGenerator:
     """Generates diagrams and visualizations for calculation results."""
     
-    def __init__(self, dpi: int = 300):
+    def __init__(self, dpi: int = 300, min_point_distance: float = 0.5):
         """
         Initialize diagram generator.
         
         Args:
             dpi: Resolution for diagrams
+            min_point_distance: Minimum distance between calculation points (meters)
         """
         self.dpi = dpi
+        self.layout_manager = ReportLayoutManager(min_point_distance=min_point_distance)
+        self.plan_organizer = PlanOrganizer()
         plt.rcParams['font.family'] = 'DejaVu Sans'  # Support for Cyrillic
     
     def generate_insolation_diagram(
@@ -141,14 +146,18 @@ class DiagramGenerator:
     def generate_room_plan(
         self,
         room: Room,
-        output_path: Optional[str] = None
+        room_result: Optional[RoomCalculationResult] = None,
+        output_path: Optional[str] = None,
+        show_calculation_points: bool = True
     ) -> Figure:
         """
-        Generate room plan with windows marked.
+        Generate room plan with windows marked and calculation points (non-overlapping).
         
         Args:
             room: Room model
+            room_result: Room calculation result (optional, for showing calculation points)
             output_path: Optional path to save diagram
+            show_calculation_points: Whether to show calculation points
         
         Returns:
             Matplotlib figure
@@ -180,6 +189,39 @@ class DiagramGenerator:
             # Add window label
             ax.text(window_x, window_y, f"W{window.id[-4:]}", 
                    ha='center', va='center', fontsize=8, fontweight='bold')
+        
+        # Add calculation points (non-overlapping)
+        if show_calculation_points and room_result:
+            # Get calculation points from KEO grid if available
+            if room_result.keo_grid_result:
+                grid_points = room_result.keo_grid_result.get('grid_points', [])
+                for point_data in grid_points:
+                    point = point_data.get('point', [0, 0])
+                    keo_value = point_data.get('keo', 0)
+                    
+                    # Add point with overlap prevention
+                    calc_point = self.layout_manager.add_calculation_point(
+                        x=point[0],
+                        y=point[1],
+                        label=f"KEO: {keo_value:.2f}%",
+                        value=keo_value,
+                        room_id=room.id,
+                        floor_number=getattr(room, 'floor_number', None)
+                    )
+                    
+                    # Draw point
+                    color = 'green' if keo_value >= 0.5 else 'orange' if keo_value >= 0.3 else 'red'
+                    ax.scatter(calc_point.x, calc_point.y, c=color, s=50, alpha=0.7, zorder=5)
+                    
+                    # Add label (only if not too crowded)
+                    if len(grid_points) < 20:  # Only label if not too many points
+                        ax.annotate(
+                            f"{keo_value:.1f}%",
+                            (calc_point.x, calc_point.y),
+                            fontsize=6,
+                            ha='center',
+                            va='bottom'
+                        )
         
         ax.set_xlim(-1, room.depth + 1)
         ax.set_ylim(-1, room.width + 1)
