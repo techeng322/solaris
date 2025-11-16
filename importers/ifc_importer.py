@@ -54,23 +54,39 @@ class IFCImporter(BaseImporter):
         """
         try:
             logger.info(f"Opening IFC file: {self.file_path}")
-            self.ifc_file = ifcopenshell.open(self.file_path)
-            logger.info("IFC file opened successfully")
+            try:
+                self.ifc_file = ifcopenshell.open(self.file_path)
+                logger.info("IFC file opened successfully")
+            except FileNotFoundError:
+                error_msg = f"IFC file not found: {self.file_path}"
+                logger.error(error_msg)
+                raise ValueError(error_msg)
+            except Exception as e:
+                error_msg = f"Failed to open IFC file '{self.file_path}': {str(e)}\n\nPossible causes:\n- File is corrupted or incomplete\n- Unsupported IFC schema version\n- File is not a valid IFC file"
+                logger.error(error_msg, exc_info=True)
+                raise ValueError(error_msg)
             
             # Detect and log IFC schema version
-            self.schema_version = self.ifc_file.schema
-            logger.info(f"IFC Schema Version: {self.schema_version}")
-            
-            # Log schema-specific information
-            if self.schema_version:
-                if 'IFC2X3' in self.schema_version:
-                    logger.info("Using IFC2X3 schema (older format)")
-                elif 'IFC4' in self.schema_version:
-                    logger.info("Using IFC4 schema (modern format)")
-                elif 'IFC4X3' in self.schema_version:
-                    logger.info("Using IFC4X3 schema (latest format)")
+            try:
+                self.schema_version = self.ifc_file.schema
+                logger.info(f"IFC Schema Version: {self.schema_version}")
+                
+                # Log schema-specific information
+                if self.schema_version:
+                    if 'IFC2X3' in self.schema_version:
+                        logger.info("Using IFC2X3 schema (older format)")
+                    elif 'IFC4' in self.schema_version:
+                        logger.info("Using IFC4 schema (modern format)")
+                    elif 'IFC4X3' in self.schema_version:
+                        logger.info("Using IFC4X3 schema (latest format)")
+            except Exception as e:
+                logger.warning(f"Could not detect IFC schema version: {e}")
+                self.schema_version = None
+        except ValueError:
+            # Re-raise ValueError as-is (already has user-friendly message)
+            raise
         except Exception as e:
-            logger.error(f"Failed to open IFC file: {e}", exc_info=True)
+            logger.error(f"Unexpected error opening IFC file: {e}", exc_info=True)
             raise ValueError(f"Failed to open IFC file: {e}")
         
         # Extract buildings
@@ -124,15 +140,23 @@ class IFCImporter(BaseImporter):
         except Exception as e:
             logger.warning(f"Error extracting IFC elements for tree: {e}")
         
-        # Generate 3D mesh for viewer display
+        # Generate 3D mesh for viewer display (always try, even in lightweight mode)
+        # Mesh generation is needed for 3D visualization
         try:
+            logger.info("Generating 3D mesh for viewer (this may take a moment for large files)...")
             self.mesh = self._generate_mesh_for_viewer()
             if self.mesh:
-                logger.info(f"Generated 3D mesh for viewer: {len(self.mesh.vertices):,} vertices, {len(self.mesh.faces):,} faces")
+                logger.info(f"✓ Generated 3D mesh for viewer: {len(self.mesh.vertices):,} vertices, {len(self.mesh.faces):,} faces")
+                logger.info("Mesh is ready for 3D viewer display")
             else:
-                logger.warning("Could not generate 3D mesh for viewer")
+                logger.warning("⚠ Could not generate 3D mesh for viewer - geometry may not be available in 3D viewer")
+                logger.info("Note: Building data and calculations will still work, but 3D visualization may be limited")
+                logger.info("Possible reasons: IFC file has no geometry, unsupported geometry format, or geometry extraction failed")
         except Exception as e:
             logger.warning(f"Error generating mesh for viewer: {e}")
+            logger.info("Note: Building data and calculations will still work, but 3D visualization may be limited")
+            import traceback
+            logger.debug(f"Mesh generation error details: {traceback.format_exc()}")
             self.mesh = None
         
         logger.info(f"Import complete: {len(buildings)} building(s) extracted")
@@ -1258,36 +1282,134 @@ class IFCImporter(BaseImporter):
                                 continue
                             
                             # Convert ifcopenshell geometry to trimesh
-                            # ifcopenshell geometry uses .verts and .faces attributes
+                            # Standard ifcopenshell API: geometry.verts and geometry.faces
                             try:
-                                # Try direct attribute access
+                                vertices = None
+                                faces = None
+                                
+                                # Primary method: Direct access to geometry.verts and geometry.faces
+                                # This is the standard ifcopenshell API
                                 if hasattr(geometry, 'verts') and hasattr(geometry, 'faces'):
-                                    verts = geometry.verts
-                                    faces_data = geometry.faces
-                                    
-                                    # Convert to numpy arrays
-                                    vertices = np.array(verts, dtype=np.float64)
-                                    if len(vertices.shape) == 1:
-                                        vertices = vertices.reshape(-1, 3)
-                                    
-                                    faces = np.array(faces_data, dtype=np.int32)
-                                    if len(faces.shape) == 1:
-                                        # Faces might be flat array, need to reshape
-                                        # Each face is 3 indices
-                                        if len(faces) % 3 == 0:
-                                            faces = faces.reshape(-1, 3)
-                                        else:
+                                    try:
+                                        verts = geometry.verts
+                                        faces_data = geometry.faces
+                                        
+                                        # Convert to numpy arrays
+                                        vertices = np.array(verts, dtype=np.float64)
+                                        # Ensure vertices are in shape (n, 3)
+                                        if len(vertices.shape) == 1:
+                                            if len(vertices) % 3 == 0:
+                                                vertices = vertices.reshape(-1, 3)
+                                            else:
+                                                logger.debug(f"Invalid vertex count: {len(vertices)} (not divisible by 3)")
+                                                continue
+                                        elif len(vertices.shape) == 2 and vertices.shape[1] != 3:
+                                            logger.debug(f"Invalid vertex shape: {vertices.shape}")
                                             continue
-                                    
-                                    if len(vertices) > 0 and len(faces) > 0:
+                                        
+                                        faces = np.array(faces_data, dtype=np.int32)
+                                        # Ensure faces are in shape (n, 3)
+                                        if len(faces.shape) == 1:
+                                            if len(faces) % 3 == 0:
+                                                faces = faces.reshape(-1, 3)
+                                            else:
+                                                logger.debug(f"Invalid face count: {len(faces)} (not divisible by 3)")
+                                                continue
+                                        elif len(faces.shape) == 2 and faces.shape[1] != 3:
+                                            logger.debug(f"Invalid face shape: {faces.shape}")
+                                            continue
+                                        
+                                        # Validate data
+                                        if len(vertices) == 0 or len(faces) == 0:
+                                            logger.debug(f"Empty geometry: {len(vertices)} vertices, {len(faces)} faces")
+                                            continue
+                                        
+                                        # Check face indices are valid
+                                        if len(faces) > 0:
+                                            max_vertex_idx = np.max(faces)
+                                            if max_vertex_idx >= len(vertices):
+                                                logger.debug(f"Face indices out of range: max index {max_vertex_idx}, but only {len(vertices)} vertices")
+                                                continue
+                                    except Exception as e:
+                                        logger.debug(f"Failed to extract geometry using standard API: {e}")
+                                        vertices = None
+                                        faces = None
+                                
+                                # Method 2: Use shape's geometry data directly
+                                if vertices is None or faces is None:
+                                    try:
+                                        # Try accessing shape's geometry data
+                                        # ifcopenshell shape has geometry with id() method
+                                        if hasattr(shape, 'geometry') and shape.geometry:
+                                            geom_obj = shape.geometry
+                                            # Try to get tessellation using id
+                                            try:
+                                                geom_id = geom_obj.id()
+                                                # Access tessellation through ifcopenshell
+                                                # Note: This may vary by ifcopenshell version
+                                                if hasattr(geom_obj, 'tessellation'):
+                                                    tess = geom_obj.tessellation()
+                                                    if tess and isinstance(tess, tuple) and len(tess) >= 2:
+                                                        vertices = np.array(tess[0], dtype=np.float64)
+                                                        faces_data = tess[1]
+                                                        faces = np.array(faces_data, dtype=np.int32)
+                                                        if len(faces.shape) == 1 and len(faces) % 3 == 0:
+                                                            faces = faces.reshape(-1, 3)
+                                            except:
+                                                pass
+                                            
+                                            # Alternative: try to get data from geometry object attributes
+                                            if vertices is None:
+                                                # Some versions use different attribute names
+                                                for attr_name in ['id', 'data', 'tess', 'tessellation']:
+                                                    if hasattr(geom_obj, attr_name):
+                                                        try:
+                                                            attr_val = getattr(geom_obj, attr_name)
+                                                            if callable(attr_val):
+                                                                attr_val = attr_val()
+                                                            # Try to extract vertices/faces from attribute
+                                                            if isinstance(attr_val, tuple) and len(attr_val) >= 2:
+                                                                vertices = np.array(attr_val[0], dtype=np.float64)
+                                                                faces_data = attr_val[1]
+                                                                faces = np.array(faces_data, dtype=np.int32)
+                                                                if len(faces.shape) == 1 and len(faces) % 3 == 0:
+                                                                    faces = faces.reshape(-1, 3)
+                                                                break
+                                                        except:
+                                                            continue
+                                    except Exception as e:
+                                        logger.debug(f"Shape geometry method failed: {e}")
+                                
+                                # Method 3: Try accessing geometry data directly
+                                if vertices is None or faces is None:
+                                    try:
+                                        # Some versions store data differently
+                                        if hasattr(geometry, 'data'):
+                                            data = geometry.data
+                                            if hasattr(data, 'verts') and hasattr(data, 'faces'):
+                                                vertices = np.array(data.verts, dtype=np.float64)
+                                                faces_data = data.faces
+                                                faces = np.array(faces_data, dtype=np.int32)
+                                                if len(faces.shape) == 1 and len(faces) % 3 == 0:
+                                                    faces = faces.reshape(-1, 3)
+                                    except Exception as e:
+                                        logger.debug(f"Data access method failed: {e}")
+                                
+                                # Create mesh if we have valid data
+                                if vertices is not None and faces is not None and len(vertices) > 0 and len(faces) > 0:
+                                    try:
                                         mesh = trimesh.Trimesh(vertices=vertices, faces=faces)
-                                        # Accept mesh even if not perfectly valid (some IFC files have issues)
-                                        if len(mesh.vertices) > 0:
+                                        # Validate the created mesh
+                                        if len(mesh.vertices) > 0 and len(mesh.faces) > 0:
                                             meshes.append(mesh)
                                             successful_elements += 1
+                                        else:
+                                            logger.debug(f"Created mesh is empty: {len(mesh.vertices)} vertices, {len(mesh.faces)} faces")
+                                    except Exception as mesh_error:
+                                        logger.debug(f"Failed to create trimesh from geometry: {mesh_error}")
+                                        continue
                                 else:
-                                    # Try alternative method: use ifcopenshell's tessellation
-                                    logger.debug(f"Geometry for {element_type} {element.id()} doesn't have expected attributes")
+                                    logger.debug(f"Could not extract valid geometry for {element_type} {element.id()}")
                             except Exception as geom_error:
                                 logger.debug(f"Error converting geometry for {element_type} {element.id()}: {geom_error}")
                                 continue
@@ -1302,20 +1424,40 @@ class IFCImporter(BaseImporter):
             
             if not meshes:
                 logger.warning("No valid meshes generated from IFC geometry")
+                logger.warning("This could mean:")
+                logger.warning("  - IFC file has no geometry data")
+                logger.warning("  - Geometry extraction failed for all elements")
+                logger.warning("  - IFC file uses unsupported geometry representation")
                 return None
             
             # Combine all meshes into one
             if len(meshes) == 1:
                 combined_mesh = meshes[0]
+                logger.info(f"Using single mesh: {len(combined_mesh.vertices):,} vertices, {len(combined_mesh.faces):,} faces")
             else:
                 logger.info(f"Combining {len(meshes)} meshes into single mesh...")
-                combined_mesh = trimesh.util.concatenate(meshes)
+                try:
+                    combined_mesh = trimesh.util.concatenate(meshes)
+                    logger.info(f"Successfully combined {len(meshes)} meshes")
+                except Exception as e:
+                    logger.error(f"Failed to combine meshes: {e}")
+                    # Try to use the first mesh as fallback
+                    if meshes:
+                        logger.warning("Using first mesh as fallback")
+                        combined_mesh = meshes[0]
+                    else:
+                        return None
             
             # Clean up mesh (remove duplicate vertices, etc.)
-            if hasattr(combined_mesh, 'process'):
-                combined_mesh.process()
+            try:
+                if hasattr(combined_mesh, 'process'):
+                    logger.debug("Processing mesh (removing duplicates, etc.)...")
+                    combined_mesh.process()
+            except Exception as e:
+                logger.warning(f"Mesh processing failed (continuing anyway): {e}")
             
-            logger.info(f"Mesh generation complete: {len(combined_mesh.vertices):,} vertices, {len(combined_mesh.faces):,} faces")
+            logger.info(f"✓ Mesh generation complete: {len(combined_mesh.vertices):,} vertices, {len(combined_mesh.faces):,} faces")
+            logger.info(f"Mesh bounds: {combined_mesh.bounds}")
             return combined_mesh
             
         except Exception as e:

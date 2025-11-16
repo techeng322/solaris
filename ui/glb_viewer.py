@@ -813,16 +813,36 @@ else:
             """)
             layout.addWidget(self.info_label)
         
-        def load_mesh(self, mesh):
-            """Load mesh and show info."""
+        def load_mesh(self, mesh, auto_open_viewer=False):
+            """Load mesh and show info. Works for both GLB and IFC files.
+            
+            Args:
+                mesh: trimesh.Trimesh object to load
+                auto_open_viewer: If True, automatically open Trimesh viewer after loading
+            """
+            import logging
+            logger = logging.getLogger(__name__)
+            
             self.mesh = mesh
             if mesh is not None:
                 info = f"Mesh loaded / Модель загружена: {len(mesh.vertices):,} vertices / вершин, {len(mesh.faces):,} faces / граней"
                 self.info_label.setText(info)
                 self.view_button.setEnabled(True)
+                logger.info(f"Mesh loaded into Trimesh viewer widget: {len(mesh.vertices):,} vertices, {len(mesh.faces):,} faces")
+                # Clear any existing window meshes when new mesh is loaded
+                self.window_meshes = {}
+                
+                # Automatically open Trimesh viewer if requested (for IFC files)
+                if auto_open_viewer and not self.trimesh_viewer_open:
+                    logger.info("Auto-opening Trimesh viewer for IFC file...")
+                    try:
+                        self.launch_trimesh_viewer()
+                    except Exception as e:
+                        logger.warning(f"Could not auto-open Trimesh viewer: {e}")
             else:
                 self.info_label.setText("No model loaded / Модель не загружена")
                 self.view_button.setEnabled(False)
+                logger.warning("No mesh provided to load_mesh()")
         
         def set_building(self, building):
             """Set building data for window highlighting."""
@@ -830,13 +850,13 @@ else:
             self.window_meshes = {}  # Clear cache when building changes
         
         def highlight_window(self, window):
-            """Highlight a specific window in Trimesh viewer."""
+            """Highlight a specific object (window or any object) in Trimesh viewer. Automatically opens viewer if not already open. Works for both GLB and IFC files."""
             import logging
             logger = logging.getLogger(__name__)
             
             if window is None:
                 self.highlighted_window = None
-                logger.info("Window highlight cleared for Trimesh viewer")
+                logger.info("Object highlight cleared for Trimesh viewer")
                 # Update viewer if it's open
                 if self.trimesh_viewer_open:
                     self._update_trimesh_viewer()
@@ -847,20 +867,46 @@ else:
                 logger.warning(f"Object {type(window)} does not have 'id' attribute - cannot highlight")
                 return
             
-            logger.info(f"Window highlighted for Trimesh viewer: {window.id}")
+            # Check if mesh is available (required for highlighting)
+            if self.mesh is None:
+                logger.warning(f"Cannot highlight object {getattr(window, 'id', 'unknown')}: No mesh loaded in viewer")
+                logger.info("Note: Make sure the model (GLB or IFC) has been loaded and mesh generation succeeded")
+                return
+            
+            # Verify mesh has valid data
+            if not hasattr(self.mesh, 'vertices') or len(self.mesh.vertices) == 0:
+                logger.warning(f"Cannot highlight object {getattr(window, 'id', 'unknown')}: Mesh has no vertices")
+                return
+            
+            logger.info(f"Object highlighted for Trimesh viewer: {window.id} (type: {type(window).__name__})")
             self.highlighted_window = window
             
-            # Generate window mesh if not cached
+            # Generate object mesh if not cached (works for windows and other objects)
             if window.id not in self.window_meshes:
-                window_mesh = self._create_window_mesh(window)
-                self.window_meshes[window.id] = window_mesh
-                if window_mesh is None:
-                    logger.warning(f"Failed to create mesh for window {window.id}")
+                object_mesh = self._create_window_mesh(window)
+                self.window_meshes[window.id] = object_mesh
+                if object_mesh is None:
+                    logger.warning(f"Failed to create mesh for object {window.id}")
                 else:
-                    logger.info(f"Created mesh for window {window.id} with {len(window_mesh.vertices)} vertices")
+                    logger.info(f"Created mesh for object {window.id} with {len(object_mesh.vertices)} vertices")
             
-            # Update viewer if it's open
-            if self.trimesh_viewer_open:
+            # If viewer is not open, open it automatically with the highlighted object
+            if not self.trimesh_viewer_open:
+                logger.info("Trimesh viewer not open - opening automatically with highlighted object")
+                # Ensure mesh is loaded before opening viewer
+                if self.mesh is None:
+                    logger.error("Cannot open Trimesh viewer: No mesh loaded. Please load a model first.")
+                    return
+                try:
+                    self.launch_trimesh_viewer()
+                    logger.info("Trimesh viewer opened successfully with highlighted object")
+                except Exception as e:
+                    logger.error(f"Could not automatically open Trimesh viewer: {e}")
+                    import traceback
+                    logger.error(f"Error details: {traceback.format_exc()}")
+            else:
+                # Update viewer if it's already open
+                logger.info("Trimesh viewer already open - updating with highlighted object")
                 self._update_trimesh_viewer()
         
         def _update_trimesh_viewer(self):
@@ -889,38 +935,38 @@ else:
                 logger.warning(f"Could not update Trimesh viewer: {e}")
         
         def _create_window_mesh(self, window):
-            """Create a trimesh representation of a window from its properties."""
+            """Create a trimesh representation of an object (window or any object) from its properties. Works for any object with center, normal, and size attributes."""
             import trimesh
             import numpy as np
             import logging
             
             logger = logging.getLogger(__name__)
             
-            # Validate window properties
+            # Validate object properties (works for windows and other objects)
             if not hasattr(window, 'center') or window.center is None:
-                logger.warning(f"Window {getattr(window, 'id', 'unknown')} missing center property")
+                logger.warning(f"Object {getattr(window, 'id', 'unknown')} missing center property")
                 return None
             if not hasattr(window, 'normal') or window.normal is None:
-                logger.warning(f"Window {getattr(window, 'id', 'unknown')} missing normal property")
+                logger.warning(f"Object {getattr(window, 'id', 'unknown')} missing normal property")
                 return None
             if not hasattr(window, 'size') or window.size is None or len(window.size) < 2:
-                logger.warning(f"Window {getattr(window, 'id', 'unknown')} missing or invalid size property")
+                logger.warning(f"Object {getattr(window, 'id', 'unknown')} missing or invalid size property")
                 return None
             
-            # Window properties
+            # Object properties
             center = np.array(window.center)
             normal = np.array(window.normal)
             width, height = window.size
             
             # Validate size values
             if width <= 0 or height <= 0:
-                logger.warning(f"Window {window.id} has invalid size: {width}x{height}")
+                logger.warning(f"Object {window.id} has invalid size: {width}x{height}")
                 return None
             
             # Normalize normal vector
             normal_norm = np.linalg.norm(normal)
             if normal_norm < 1e-6:
-                logger.warning(f"Window {window.id} has zero-length normal vector")
+                logger.warning(f"Object {window.id} has zero-length normal vector")
                 return None
             normal = normal / normal_norm
             
@@ -930,7 +976,7 @@ else:
             else:
                 up_ref = np.array([0, 1, 0])
             
-            # Calculate right and up vectors for the window plane
+            # Calculate right and up vectors for the object plane
             right = np.cross(normal, up_ref)
             right_norm = np.linalg.norm(right)
             if right_norm < 1e-6:
@@ -971,110 +1017,162 @@ else:
                 [0, 2, 3]
             ])
             
-            # Create trimesh
-            window_mesh = trimesh.Trimesh(vertices=vertices, faces=faces)
-            return window_mesh
+            # Create trimesh (works for windows and other objects)
+            object_mesh = trimesh.Trimesh(vertices=vertices, faces=faces)
+            return object_mesh
         
         def _create_trimesh_scene(self):
-            """Create a trimesh scene with main mesh and highlighted window (if any)."""
+            """Create a trimesh scene with main mesh and highlighted object (if any). Works for windows and other objects."""
             import trimesh
             import logging
             logger = logging.getLogger(__name__)
             
+            # Validate mesh is available
+            if self.mesh is None:
+                logger.error("Cannot create Trimesh scene: No mesh loaded")
+                raise ValueError("No mesh loaded - cannot create scene")
+            
+            if not hasattr(self.mesh, 'vertices') or len(self.mesh.vertices) == 0:
+                logger.error("Cannot create Trimesh scene: Mesh has no vertices")
+                raise ValueError("Mesh has no vertices - cannot create scene")
+            
             # Create scene
             scene = trimesh.Scene()
             
-            # Add main mesh to scene
-            scene.add_geometry(self.mesh, node_name='building')
+            # Add main mesh to scene (CRITICAL - this is the IFC/GLB model)
+            try:
+                scene.add_geometry(self.mesh, node_name='building')
+                logger.info(f"Added main mesh to scene: {len(self.mesh.vertices):,} vertices, {len(self.mesh.faces):,} faces")
+            except Exception as e:
+                logger.error(f"Failed to add main mesh to scene: {e}")
+                raise
             
-            # Add highlighted window mesh if available
+            # Add highlighted object mesh if available (works for windows and other objects)
             if self.highlighted_window is not None:
-                window_mesh = self.window_meshes.get(self.highlighted_window.id)
-                if window_mesh is not None:
-                    # Color the window mesh blue/cyan for highlighting
+                object_id = getattr(self.highlighted_window, 'id', 'unknown')
+                object_mesh = self.window_meshes.get(object_id)
+                if object_mesh is not None:
+                    # Color the object mesh blue/cyan for highlighting
                     try:
-                        window_mesh.visual.face_colors = [0, 128, 255, 200]  # Blue with transparency
-                        scene.add_geometry(window_mesh, node_name=f'window_{self.highlighted_window.id}')
-                        logger.info(f"Added highlighted window {self.highlighted_window.id} to Trimesh scene")
+                        object_mesh.visual.face_colors = [0, 128, 255, 200]  # Blue with transparency
+                        scene.add_geometry(object_mesh, node_name=f'highlighted_{object_id}')
+                        logger.info(f"Added highlighted object {object_id} to Trimesh scene")
                     except Exception as e:
-                        logger.warning(f"Could not color window mesh: {e}, showing without color")
-                        scene.add_geometry(window_mesh, node_name=f'window_{self.highlighted_window.id}')
+                        logger.warning(f"Could not color object mesh: {e}, showing without color")
+                        scene.add_geometry(object_mesh, node_name=f'highlighted_{object_id}')
                 else:
-                    logger.warning(f"Window mesh not available for {self.highlighted_window.id}")
+                    logger.warning(f"Object mesh not available for {object_id}")
             
+            logger.info(f"Trimesh scene created with {len(scene.geometry)} geometry object(s)")
             return scene
         
         def launch_trimesh_viewer(self):
-            """Launch trimesh's built-in viewer with optional window highlighting."""
-            if self.mesh is not None:
+            """Launch trimesh's built-in viewer with optional window highlighting. Works for both GLB and IFC files."""
+            import logging
+            logger = logging.getLogger(__name__)
+            
+            if self.mesh is None:
+                logger.error("Cannot launch Trimesh viewer: No mesh loaded")
+                QMessageBox.warning(
+                    self,
+                    "Viewer Error / Ошибка просмотра",
+                    "No mesh loaded.\n"
+                    "Модель не загружена.\n\n"
+                    "Please load a model (GLB or IFC file) first.\n"
+                    "Пожалуйста, сначала загрузите модель (GLB или IFC файл)."
+                )
+                return
+            
+            if not hasattr(self.mesh, 'vertices') or len(self.mesh.vertices) == 0:
+                logger.error("Cannot launch Trimesh viewer: Mesh has no vertices")
+                QMessageBox.warning(
+                    self,
+                    "Viewer Error / Ошибка просмотра",
+                    "Mesh has no geometry.\n"
+                    "Модель не имеет геометрии.\n\n"
+                    "The loaded model has no vertices.\n"
+                    "Загруженная модель не имеет вершин."
+                )
+                return
+            
+            try:
+                # Check if pyglet is available
                 try:
-                    # Check if pyglet is available
-                    try:
-                        import pyglet
-                        if not hasattr(pyglet, 'app'):
-                            raise ImportError("pyglet.app not available")
-                    except ImportError as e:
+                    import pyglet
+                    if not hasattr(pyglet, 'app'):
+                        raise ImportError("pyglet.app not available")
+                except ImportError as e:
+                    QMessageBox.warning(
+                        self,
+                        "Viewer Error / Ошибка просмотра",
+                        "Trimesh viewer requires pyglet<2.\n"
+                        "Trimesh просмотр требует pyglet<2.\n\n"
+                        f"Error / Ошибка: {str(e)}\n\n"
+                        "Please install: pip install \"pyglet<2\""
+                    )
+                    return
+                
+                # Create scene with main mesh and highlighted window (if any)
+                logger.info(f"Creating Trimesh scene with mesh: {len(self.mesh.vertices):,} vertices, {len(self.mesh.faces):,} faces")
+                scene = self._create_trimesh_scene()
+                
+                # Mark viewer as open
+                self.trimesh_viewer_open = True
+                
+                # Try to launch viewer (must be in main thread for pyglet)
+                # Note: This may block the UI, but pyglet requires main thread
+                try:
+                    logger.info("Launching Trimesh viewer window...")
+                    scene.show()
+                    logger.info("Trimesh viewer launched successfully")
+                except RuntimeError as e:
+                    error_msg = str(e)
+                    if "EventLoop.run()" in error_msg or "thread" in error_msg.lower():
                         QMessageBox.warning(
                             self,
                             "Viewer Error / Ошибка просмотра",
-                            "Trimesh viewer requires pyglet<2.\n"
-                            "Trimesh просмотр требует pyglet<2.\n\n"
-                            f"Error / Ошибка: {str(e)}\n\n"
-                            "Please install: pip install \"pyglet<2\""
+                            "Trimesh viewer cannot run in a separate thread.\n"
+                            "Trimesh просмотр не может работать в отдельном потоке.\n\n"
+                            "The viewer requires the main thread.\n"
+                            "Просмотр требует главный поток.\n\n"
+                            "Note: This feature may not work in all environments.\n"
+                            "Примечание: Эта функция может не работать во всех средах."
                         )
-                        return
-                    
-                    # Create scene with main mesh and highlighted window (if any)
-                    scene = self._create_trimesh_scene()
-                    
-                    # Mark viewer as open
-                    self.trimesh_viewer_open = True
-                    
-                    # Try to launch viewer (must be in main thread for pyglet)
-                    # Note: This may block the UI, but pyglet requires main thread
-                    try:
-                        scene.show()
-                    except RuntimeError as e:
-                        error_msg = str(e)
-                        if "EventLoop.run()" in error_msg or "thread" in error_msg.lower():
-                            QMessageBox.warning(
-                                self,
-                                "Viewer Error / Ошибка просмотра",
-                                "Trimesh viewer cannot run in a separate thread.\n"
-                                "Trimesh просмотр не может работать в отдельном потоке.\n\n"
-                                "The viewer requires the main thread.\n"
-                                "Просмотр требует главный поток.\n\n"
-                                "Note: This feature may not work in all environments.\n"
-                                "Примечание: Эта функция может не работать во всех средах."
-                            )
-                        elif "OpenGL" in error_msg or "wgl" in error_msg.lower() or "ARB" in error_msg:
-                            QMessageBox.warning(
-                                self,
-                                "Viewer Error / Ошибка просмотра",
-                                "OpenGL driver does not support required features.\n"
-                                "Драйвер OpenGL не поддерживает необходимые функции.\n\n"
-                                f"Error / Ошибка: {error_msg}\n\n"
-                                "The trimesh viewer requires OpenGL support.\n"
-                                "Trimesh просмотр требует поддержку OpenGL.\n\n"
-                                "Try using the embedded 3D viewer instead.\n"
-                                "Попробуйте использовать встроенный 3D просмотр."
-                            )
-                        else:
-                            QMessageBox.warning(
-                                self,
-                                "Viewer Error / Ошибка просмотра",
-                                f"Could not launch viewer / Не удалось запустить просмотр:\n{error_msg}"
-                            )
-                    except Exception as e:
+                    elif "OpenGL" in error_msg or "wgl" in error_msg.lower() or "ARB" in error_msg:
                         QMessageBox.warning(
                             self,
                             "Viewer Error / Ошибка просмотра",
-                            f"Could not launch viewer / Не удалось запустить просмотр:\n{str(e)}"
+                            "OpenGL driver does not support required features.\n"
+                            "Драйвер OpenGL не поддерживает необходимые функции.\n\n"
+                            f"Error / Ошибка: {error_msg}\n\n"
+                            "The trimesh viewer requires OpenGL support.\n"
+                            "Trimesh просмотр требует поддержку OpenGL.\n\n"
+                            "Try using the embedded 3D viewer instead.\n"
+                            "Попробуйте использовать встроенный 3D просмотр."
                         )
+                    else:
+                        QMessageBox.warning(
+                            self,
+                            "Viewer Error / Ошибка просмотра",
+                            f"Could not launch viewer / Не удалось запустить просмотр:\n{error_msg}"
+                        )
+                    logger.error(f"Failed to launch Trimesh viewer: {error_msg}")
                 except Exception as e:
+                    logger.error(f"Unexpected error launching Trimesh viewer: {e}")
+                    import traceback
+                    logger.error(f"Error details: {traceback.format_exc()}")
                     QMessageBox.warning(
                         self,
                         "Viewer Error / Ошибка просмотра",
                         f"Could not launch viewer / Не удалось запустить просмотр:\n{str(e)}"
                     )
+            except Exception as e:
+                logger.error(f"Error in launch_trimesh_viewer outer try block: {e}")
+                import traceback
+                logger.error(f"Error details: {traceback.format_exc()}")
+                QMessageBox.warning(
+                    self,
+                    "Viewer Error / Ошибка просмотра",
+                    f"Could not launch viewer / Не удалось запустить просмотр:\n{str(e)}"
+                )
 
