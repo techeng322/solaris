@@ -15,24 +15,70 @@ try:
         QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel,
         QSlider, QGroupBox, QMessageBox, QSizePolicy
     )
-    from PyQt6.QtCore import Qt, pyqtSignal
+    from PyQt6.QtCore import Qt, pyqtSignal, QTimer
     from PyQt6.QtOpenGLWidgets import QOpenGLWidget
-    from PyQt6.QtGui import QOpenGLShaderProgram, QOpenGLShader, QMatrix4x4, QVector3D, QVector4D
+    from PyQt6.QtGui import QMatrix4x4, QVector3D, QVector4D
+    # Import OpenGL shader classes
+    # In PyQt6, QOpenGLShaderProgram and QOpenGLShader are in PyQt6.QtOpenGL
+    # This module may not be available in all PyQt6 installations
+    try:
+        from PyQt6.QtOpenGL import QOpenGLShaderProgram, QOpenGLShader
+    except ImportError:
+        # QtOpenGL module is not available
+        # This is a known issue with some PyQt6 installations
+        # The embedded OpenGL viewer requires these classes
+        # Solution: Use the Trimesh fallback viewer or reinstall PyQt6 with OpenGL support
+        raise ImportError(
+            "PyQt6.QtOpenGL module not available.\n"
+            "The embedded 3D viewer requires QOpenGLShaderProgram and QOpenGLShader.\n"
+            "These are in PyQt6.QtOpenGL which may not be included in your PyQt6 installation.\n"
+            "Options:\n"
+            "1. Use the Trimesh viewer (fallback - already working)\n"
+            "2. Reinstall PyQt6: pip uninstall PyQt6 && pip install PyQt6\n"
+            "3. Check if PyQt6-Qt6 package is available: pip install PyQt6-Qt6"
+        )
     PYQT6_AVAILABLE = True
-except ImportError:
+    # Log at module load (logging may not be configured yet, so use print as fallback)
+    try:
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.info("✓ PyQt6 imported successfully")
+    except:
+        print("✓ PyQt6 imported successfully")
+except ImportError as e:
     PYQT6_AVAILABLE = False
+    # Log at module load (logging may not be configured yet, so use print as fallback)
+    try:
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.error(f"❌ PyQt6 import failed: {e}")
+    except:
+        print(f"❌ PyQt6 import failed: {e}")
 
 # Check OpenGL availability dynamically
 def check_opengl_available():
     """Check if OpenGL is available at runtime."""
+    import logging
+    logger = logging.getLogger(__name__)
+    
+    logger.info("=== Checking OpenGL availability ===")
     if not PYQT6_AVAILABLE:
+        logger.error("❌ PyQt6 not available - OpenGL cannot be used")
         return False
+    logger.info("✓ PyQt6 is available")
+    
     try:
         from OpenGL import GL
+        logger.info("✓ OpenGL module imported successfully")
         # Also check that QOpenGLWidget is available
         from PyQt6.QtOpenGLWidgets import QOpenGLWidget
+        logger.info("✓ QOpenGLWidget is available")
+        logger.info("✓ OpenGL is AVAILABLE - embedded 3D viewer will be used")
         return True
-    except ImportError:
+    except ImportError as e:
+        logger.error(f"❌ OpenGL import failed: {e}")
+        logger.error("   Install with: pip install PyOpenGL PyOpenGL-accelerate")
+        logger.error("   Then restart the application")
         return False
 
 # Check at module load time (but will re-check at runtime)
@@ -40,6 +86,16 @@ OPENGL_AVAILABLE = check_opengl_available()
 
 # Always define GLBViewerWidget if PyQt6 is available (will check OpenGL at runtime)
 if PYQT6_AVAILABLE:
+    # Log which viewer class will be used
+    try:
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.info("=== Module glb_viewer.py loaded ===")
+        logger.info(f"PYQT6_AVAILABLE: {PYQT6_AVAILABLE}")
+        logger.info(f"OPENGL_AVAILABLE (module load): {OPENGL_AVAILABLE}")
+        logger.info("Using OpenGL-enabled GLBViewerWidget class (will check OpenGL at runtime)")
+    except:
+        pass  # Logging may not be configured yet
     class GLBViewerOpenGLWidget(QOpenGLWidget):
         """OpenGL widget for displaying 3D GLB models with orbit-style camera."""
         
@@ -66,21 +122,35 @@ if PYQT6_AVAILABLE:
             self.window_meshes = {}  # Cache of window/space/door geometry meshes
             self.highlight_is_space = False  # Track if current highlight is a space (for red color)
             self.highlight_is_door = False  # Track if current highlight is a door (for green color)
+            # Auto-rotation
+            self.auto_rotate = False  # Auto-rotation enabled/disabled
+            self.rotation_speed = 0.5  # Degrees per frame (adjustable)
+            self.rotation_timer = QTimer(self)
+            self.rotation_timer.timeout.connect(self._auto_rotate_step)
+            self.rotation_timer.setInterval(16)  # ~60 FPS
+            
+            # Enable keyboard focus for arrow key controls
+            self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
             
         def set_mesh(self, mesh):
             """Set the mesh to display."""
             import logging
             logger = logging.getLogger(__name__)
             
+            logger.info("=== set_mesh() called ===")
+            logger.info(f"Mesh provided: {mesh is not None}")
+            
             self.mesh = mesh
             if mesh is not None:
                 # Calculate center and scale
                 vertices = mesh.vertices
                 if len(vertices) > 0:
+                    logger.info(f"✓ Mesh has {len(vertices):,} vertices, {len(mesh.faces):,} faces")
                     min_bounds = np.min(vertices, axis=0)
                     max_bounds = np.max(vertices, axis=0)
                     center = (min_bounds + max_bounds) / 2
                     self.center = QVector3D(center[0], center[1], center[2])
+                    logger.info(f"✓ Calculated mesh center: ({self.center.x():.2f}, {self.center.y():.2f}, {self.center.z():.2f})")
                     
                     # Calculate scale to fit in view and set appropriate camera distance
                     size = np.max(max_bounds - min_bounds)
@@ -92,20 +162,28 @@ if PYQT6_AVAILABLE:
                         # Reset pan when loading new model
                         self.pan_x = 0.0
                         self.pan_y = 0.0
-                    logger.info(f"Mesh set: {len(vertices):,} vertices, {len(mesh.faces):,} faces")
+                        logger.info(f"✓ Calculated camera distance: {self.distance:.2f} (model size: {size:.2f})")
+                    else:
+                        logger.warning("⚠ Mesh size is 0 - cannot calculate camera distance")
+                    logger.info(f"✓ Mesh set successfully: {len(vertices):,} vertices, {len(mesh.faces):,} faces")
                 else:
-                    logger.warning("Mesh has no vertices")
+                    logger.error("❌ Mesh has no vertices - cannot display")
             else:
-                logger.warning("Mesh is None")
+                logger.error("❌ Mesh is None - cannot display")
             
             # Force update - ensure widget is visible and OpenGL context is ready
             # Only make context current if widget is visible (otherwise it will fail)
+            logger.info(f"Widget visible: {self.isVisible()}")
             if self.isVisible():
                 try:
                     self.makeCurrent()  # Ensure OpenGL context is current
+                    logger.info("✓ Made OpenGL context current")
                 except Exception as e:
-                    logger.warning(f"Could not make OpenGL context current: {e}")
+                    logger.warning(f"⚠ Could not make OpenGL context current: {e}")
+            else:
+                logger.info("Widget not visible - will render when shown")
             self.update()  # Trigger repaint
+            logger.info("✓ Called update() to trigger repaint")
         
         def set_building(self, building):
             """Set building data for window highlighting."""
@@ -132,12 +210,19 @@ if PYQT6_AVAILABLE:
                 return
             
             # DIAGNOSTIC: Log object type and attributes
-            logger.info(f"=== DOOR HIGHLIGHT DIAGNOSTIC ===")
+            logger.info(f"=== WINDOW/OBJECT HIGHLIGHT DIAGNOSTIC ===")
             logger.info(f"Object type: {type(window).__name__}")
             logger.info(f"Object class: {window.__class__}")
-            logger.info(f"Has 'is_a' method: {hasattr(window, 'is_a')}")
-            if hasattr(window, 'is_a'):
-                logger.info(f"is_a callable: {callable(window.is_a)}")
+            logger.info(f"Object module: {getattr(window.__class__, '__module__', 'unknown')}")
+            
+            # Check if this is a Window object from models.building
+            is_window_object = False
+            try:
+                from models.building import Window
+                is_window_object = isinstance(window, Window)
+                logger.info(f"Is Window object (from models.building): {is_window_object}")
+            except ImportError:
+                logger.debug("Could not import Window class for type checking")
             
             # Check if this is an IFC element (space, door, etc.)
             is_ifc_space = False
@@ -154,10 +239,8 @@ if PYQT6_AVAILABLE:
                 is_ifc_space = 'IfcSpace' in class_str
                 is_ifc_door = 'IfcDoor' in class_str
                 logger.info(f"Using class string check: class_str={class_str}, is_ifc_space={is_ifc_space}, is_ifc_door={is_ifc_door}")
-            else:
-                logger.warning(f"Object has no 'is_a' method or '__class__' attribute")
             
-            logger.info(f"Final detection: is_ifc_space={is_ifc_space}, is_ifc_door={is_ifc_door}")
+            logger.info(f"Final detection: is_window_object={is_window_object}, is_ifc_space={is_ifc_space}, is_ifc_door={is_ifc_door}")
             
             # Get object ID
             obj_id = None
@@ -180,7 +263,7 @@ if PYQT6_AVAILABLE:
             
             # Check if widget is visible - if not, store highlight for later
             if not self.isVisible():
-                obj_type = 'space' if is_ifc_space else ('door' if is_ifc_door else 'object')
+                obj_type = 'space' if is_ifc_space else ('door' if is_ifc_door else ('window' if is_window_object else 'object'))
                 logger.info(f"Widget not visible - storing highlight for {obj_type} {obj_id} to apply when visible")
                 self.highlighted_window = window
                 # Still create the mesh so it's ready when widget becomes visible
@@ -194,6 +277,7 @@ if PYQT6_AVAILABLE:
                         if door_mesh:
                             self.window_meshes[obj_id] = door_mesh
                     else:
+                        # Window object or generic object with center/normal/size
                         window_mesh = self._create_window_mesh(window)
                         if window_mesh:
                             self.window_meshes[obj_id] = window_mesh
@@ -215,13 +299,14 @@ if PYQT6_AVAILABLE:
                         if door_mesh:
                             self.window_meshes[obj_id] = door_mesh
                     else:
+                        # Window object or generic object with center/normal/size
                         window_mesh = self._create_window_mesh(window)
                         if window_mesh:
                             self.window_meshes[obj_id] = window_mesh
                 return
             
             # Check if main mesh is loaded
-            obj_type = 'space' if is_ifc_space else ('door' if is_ifc_door else 'object')
+            obj_type = 'space' if is_ifc_space else ('door' if is_ifc_door else ('window' if is_window_object else 'object'))
             if self.mesh is None or len(self.mesh.vertices) == 0:
                 logger.warning(f"Cannot highlight {obj_type} {obj_id}: No mesh loaded in 3D viewer")
                 return
@@ -252,12 +337,16 @@ if PYQT6_AVAILABLE:
                     else:
                         logger.info(f"✓ Created mesh for door {obj_id} with {len(door_mesh.vertices)} vertices, {len(door_mesh.faces)} faces")
                 else:
+                    # Window object or generic object with center/normal/size
+                    logger.info(f"Creating window/object mesh from properties (center, normal, size)")
                     window_mesh = self._create_window_mesh(window)
                     self.window_meshes[obj_id] = window_mesh
                     if window_mesh is None:
-                        logger.error(f"❌ ISSUE #2: Error on highlight part - Failed to create mesh for object {obj_id}")
+                        logger.error(f"❌ ISSUE #2: Error on highlight part - Failed to create mesh for {obj_type} {obj_id}")
+                        logger.error(f"   This usually means the object is missing center, normal, or size properties")
+                        logger.error(f"   Object has center: {hasattr(window, 'center')}, normal: {hasattr(window, 'normal')}, size: {hasattr(window, 'size')}")
                     else:
-                        logger.info(f"✓ Created mesh for object {obj_id} with {len(window_mesh.vertices)} vertices, {len(window_mesh.faces)} faces")
+                        logger.info(f"✓ Created mesh for {obj_type} {obj_id} with {len(window_mesh.vertices)} vertices, {len(window_mesh.faces)} faces")
             else:
                 logger.info(f"Using cached mesh for {obj_type} {obj_id}")
                 cached_mesh = self.window_meshes[obj_id]
@@ -269,6 +358,7 @@ if PYQT6_AVAILABLE:
             # Store highlight type for color selection
             self.highlight_is_space = is_ifc_space
             self.highlight_is_door = is_ifc_door
+            # Note: Window objects (is_window_object) will use default blue color (not space/door)
             
             # Force update to redraw with highlight
             try:
@@ -607,13 +697,16 @@ if PYQT6_AVAILABLE:
                 GL.glCullFace(GL.GL_BACK)
                 logger.info("OpenGL initialized - shaders will be created")
                 
-                # Simple shader program for default mesh
+                # Simple shader program for default mesh with better visibility
                 vertex_shader = QOpenGLShader(QOpenGLShader.ShaderTypeBit.Vertex)
                 if not vertex_shader.compileSourceCode("""
                     attribute vec3 position;
                     uniform mat4 mvpMatrix;
+                    varying float depth;
                     void main() {
                         gl_Position = mvpMatrix * vec4(position, 1.0);
+                        // Pass depth for simple shading
+                        depth = gl_Position.z / gl_Position.w;
                     }
                 """):
                     logger.error(f"Failed to compile vertex shader: {vertex_shader.log()}")
@@ -621,8 +714,18 @@ if PYQT6_AVAILABLE:
                 
                 fragment_shader = QOpenGLShader(QOpenGLShader.ShaderTypeBit.Fragment)
                 if not fragment_shader.compileSourceCode("""
+                    varying float depth;
                     void main() {
-                        gl_FragColor = vec4(0.8, 0.8, 0.9, 1.0);
+                        // Professional light gray-blue base color (brighter and more visible)
+                        vec3 baseColor = vec3(0.85, 0.88, 0.92);
+                        
+                        // Simple depth-based shading for better 3D perception
+                        float depthFactor = 0.7 + 0.3 * smoothstep(-1.0, 1.0, depth);
+                        
+                        // Apply depth shading
+                        vec3 finalColor = baseColor * depthFactor;
+                        
+                        gl_FragColor = vec4(finalColor, 1.0);
                     }
                 """):
                     logger.error(f"Failed to compile fragment shader: {fragment_shader.log()}")
@@ -695,9 +798,16 @@ if PYQT6_AVAILABLE:
             logger = logging.getLogger(__name__)
             
             try:
+                # Only log first call and errors to avoid spam
+                if not hasattr(self, '_paintgl_logged'):
+                    logger.info("=== STEP 1: paintGL() called (first time) ===")
+                    self._paintgl_logged = True
+                
                 # Ensure we have a valid OpenGL context
                 if not self.isValid():
-                    logger.warning("OpenGL context is not valid - cannot render")
+                    if not hasattr(self, '_context_error_logged'):
+                        logger.error("❌ STEP 1 FAILED: OpenGL context is not valid - cannot render")
+                        self._context_error_logged = True
                     return
                 
                 # Clear with dark background to avoid white screen
@@ -706,12 +816,25 @@ if PYQT6_AVAILABLE:
                 
                 # Check if shaders are initialized
                 if self.shader_program is None:
-                    logger.debug("Shader program not initialized yet - showing background only")
+                    if not hasattr(self, '_shader_error_logged'):
+                        logger.error("❌ STEP 3 FAILED: Shader program not initialized yet - showing background only")
+                        logger.error("   This means OpenGL initialization failed or widget is not visible yet")
+                        self._shader_error_logged = True
                     return
                 
-                if self.mesh is None or len(self.mesh.vertices) == 0:
-                    # Draw a message or just show background
-                    logger.debug("No mesh loaded - showing background only")
+                if self.mesh is None:
+                    # This is normal during initialization - widget renders before mesh is loaded
+                    # Only log once as debug/info, not as error
+                    if not hasattr(self, '_mesh_none_logged'):
+                        logger.debug("Mesh not loaded yet - showing background (this is normal during initialization)")
+                        self._mesh_none_logged = True
+                    return
+                
+                if len(self.mesh.vertices) == 0:
+                    if not hasattr(self, '_mesh_empty_logged'):
+                        logger.warning("⚠ Mesh has no vertices - showing background only")
+                        logger.warning(f"   Mesh object exists but has 0 vertices (faces: {len(self.mesh.faces) if hasattr(self.mesh, 'faces') else 'N/A'})")
+                        self._mesh_empty_logged = True
                     return
                 
                 # Setup matrices
@@ -771,8 +894,14 @@ if PYQT6_AVAILABLE:
                 
                 # Draw main mesh
                 if self.mesh is not None and len(self.mesh.vertices) > 0:
+                    if not hasattr(self, '_mesh_drawn_logged'):
+                        logger.info(f"=== STEP 7: Drawing main mesh - {len(self.mesh.vertices):,} vertices, {len(self.mesh.faces):,} faces ===")
+                        self._mesh_drawn_logged = True
+                    
                     if not self.shader_program.bind():
-                        logger.error("Failed to bind shader program")
+                        if not hasattr(self, '_bind_error_logged'):
+                            logger.error("❌ STEP 7 FAILED: Failed to bind shader program")
+                            self._bind_error_logged = True
                         return
                     
                     self.shader_program.setUniformValue("mvpMatrix", mvp)
@@ -794,75 +923,91 @@ if PYQT6_AVAILABLE:
                     
                     self.shader_program.release()
                 
-                # Draw highlighted window/space with colored surface
+                # Draw highlighted window/space/door with colored surface
                 if self.highlighted_window is not None:
+                    logger.info("=== STEP 8: Drawing highlighted object ===")
                     # Get object ID (works for both Window objects and IFC elements)
                     obj_id = None
                     if hasattr(self.highlighted_window, 'GlobalId'):
                         obj_id = self.highlighted_window.GlobalId
+                        logger.info(f"✓ STEP 8a: Found GlobalId: {obj_id}")
                     elif hasattr(self.highlighted_window, 'id'):
                         obj_id = str(self.highlighted_window.id) if callable(self.highlighted_window.id) else self.highlighted_window.id
+                        logger.info(f"✓ STEP 8a: Found id: {obj_id}")
                     
                     if obj_id is None:
-                        logger.warning("❌ ISSUE #1: Highlighted object has no identifiable ID")
+                        logger.error("❌ STEP 8 FAILED: Highlighted object has no identifiable ID")
+                        logger.error(f"   Object type: {type(self.highlighted_window).__name__}")
+                        logger.error(f"   Object attributes: {[attr for attr in dir(self.highlighted_window) if not attr.startswith('_')]}")
                     else:
                         window_mesh = self.window_meshes.get(obj_id)
                         if window_mesh is None:
-                            logger.error(f"❌ ISSUE #3: Can't see the highlight part - Mesh not found in cache for {obj_id}")
+                            logger.error(f"❌ STEP 8 FAILED: Mesh not found in cache for {obj_id}")
                             logger.error(f"   Available cached meshes: {list(self.window_meshes.keys())}")
+                            logger.error(f"   This means mesh creation failed - check highlight_window() logs")
                         elif len(window_mesh.vertices) == 0:
-                            logger.error(f"❌ ISSUE #3: Can't see the highlight part - Mesh has no vertices for {obj_id}")
+                            logger.error(f"❌ STEP 8 FAILED: Mesh has no vertices for {obj_id}")
                         else:
-                            logger.debug(f"✓ Rendering highlight for {obj_id}: {len(window_mesh.vertices)} vertices, {len(window_mesh.faces)} faces")
+                            logger.info(f"✓ STEP 8b: Found cached mesh for {obj_id}: {len(window_mesh.vertices)} vertices, {len(window_mesh.faces)} faces")
                         if window_mesh is not None and len(window_mesh.vertices) > 0:
                             # Check if colored shader is available
                             if self.shader_program_colored is None:
-                                import logging
-                                logging.warning("Colored shader not initialized - cannot highlight window")
+                                logger.error("❌ STEP 8c FAILED: Colored shader not initialized - cannot highlight window")
+                                logger.error("   This means OpenGL initialization failed for colored shader")
                             else:
                                 try:
+                                    logger.info("✓ STEP 8c: Colored shader is available")
                                     # Use colored shader
                                     if not self.shader_program_colored.bind():
-                                        import logging
-                                        logging.error("Failed to bind colored shader for window highlighting")
+                                        logger.error("❌ STEP 8d FAILED: Failed to bind colored shader for window highlighting")
                                     else:
+                                        logger.info("✓ STEP 8d: Colored shader bound successfully")
                                         self.shader_program_colored.setUniformValue("mvpMatrix", mvp)
                                         
                                         # Highlight color: red for spaces, green for doors, blue for windows
                                         if getattr(self, 'highlight_is_space', False):
                                             color_vec = QVector4D(1.0, 0.0, 0.0, 0.6)  # Red, semi-transparent for spaces
+                                            color_name = "red (space)"
                                         elif getattr(self, 'highlight_is_door', False):
                                             color_vec = QVector4D(0.0, 1.0, 0.0, 0.6)  # Green, semi-transparent for doors
+                                            color_name = "green (door)"
                                         else:
                                             color_vec = QVector4D(0.0, 0.5, 1.0, 0.8)  # Blue, semi-transparent for windows
+                                            color_name = "blue (window)"
                                         self.shader_program_colored.setUniformValue("color", color_vec)
+                                        logger.info(f"✓ STEP 8e: Color set to {color_name}")
                                         
                                         # Enable blending for transparency
                                         GL.glEnable(GL.GL_BLEND)
                                         GL.glBlendFunc(GL.GL_SRC_ALPHA, GL.GL_ONE_MINUS_SRC_ALPHA)
+                                        logger.info("✓ STEP 8f: Blending enabled for transparency")
                                         
                                         # Draw window/door/space mesh
                                         vertices = window_mesh.vertices
                                         faces = window_mesh.faces
                                         
                                         GL.glBegin(GL.GL_TRIANGLES)
+                                        highlight_triangles = 0
                                         for face in faces:
                                             for vertex_idx in face:
                                                 if vertex_idx < len(vertices):
                                                     v = vertices[vertex_idx]
                                                     GL.glVertex3f(float(v[0]), float(v[1]), float(v[2]))
+                                                    highlight_triangles += 1
                                         GL.glEnd()
+                                        logger.info(f"✓ STEP 8g: Drawn {highlight_triangles // 3:,} triangles for highlighted object")
                                         
                                         GL.glDisable(GL.GL_BLEND)
                                         self.shader_program_colored.release()
+                                        logger.info("✓ STEP 8h: Highlight rendering complete")
                                 except Exception as e:
-                                    import logging
-                                    logging.error(f"Error rendering highlighted window: {e}", exc_info=True)
+                                    logger.error(f"❌ STEP 8 ERROR: Error rendering highlighted window: {e}", exc_info=True)
                         else:
-                            import logging
-                            logging.debug(f"Object mesh not available for highlighting: {obj_id}")
+                            logger.warning(f"⚠ STEP 8 SKIPPED: Object mesh not available for highlighting: {obj_id}")
+                else:
+                    logger.debug("No highlighted object - skipping STEP 8")
             except Exception as e:
-                logger.error(f"Error in paintGL: {e}", exc_info=True)
+                logger.error(f"❌ FATAL ERROR in paintGL: {e}", exc_info=True)
         
         def mousePressEvent(self, event):
             """Handle mouse press for rotation and panning."""
@@ -939,6 +1084,53 @@ if PYQT6_AVAILABLE:
             self.last_pos = event.position()
             self.update()
         
+        def keyPressEvent(self, event):
+            """Handle keyboard input for rotation controls."""
+            key = event.key()
+            
+            # Arrow keys for rotation
+            if key == Qt.Key.Key_Left:
+                self.azimuth -= 5.0  # Rotate left
+                self.azimuth = self.azimuth % 360.0
+                self.update()
+            elif key == Qt.Key.Key_Right:
+                self.azimuth += 5.0  # Rotate right
+                self.azimuth = self.azimuth % 360.0
+                self.update()
+            elif key == Qt.Key.Key_Up:
+                self.elevation += 5.0  # Rotate up
+                self.elevation = max(-89.0, min(89.0, self.elevation))
+                self.update()
+            elif key == Qt.Key.Key_Down:
+                self.elevation -= 5.0  # Rotate down
+                self.elevation = max(-89.0, min(89.0, self.elevation))
+                self.update()
+            # Space bar to toggle auto-rotation
+            elif key == Qt.Key.Key_Space:
+                self.toggle_auto_rotate()
+            else:
+                super().keyPressEvent(event)
+        
+        def _auto_rotate_step(self):
+            """Step function for auto-rotation timer."""
+            if self.auto_rotate:
+                self.azimuth += self.rotation_speed
+                self.azimuth = self.azimuth % 360.0
+                self.update()
+        
+        def toggle_auto_rotate(self):
+            """Toggle auto-rotation on/off."""
+            self.auto_rotate = not self.auto_rotate
+            if self.auto_rotate:
+                self.rotation_timer.start()
+            else:
+                self.rotation_timer.stop()
+            return self.auto_rotate
+        
+        def set_rotation_speed(self, speed):
+            """Set rotation speed (degrees per frame)."""
+            self.rotation_speed = max(0.1, min(5.0, speed))  # Clamp between 0.1 and 5.0
+        
         def wheelEvent(self, event):
             """Handle mouse wheel for zoom (distance adjustment)."""
             delta = event.angleDelta().y() / 120.0
@@ -987,13 +1179,22 @@ if PYQT6_AVAILABLE:
         
         def __init__(self, parent=None):
             super().__init__(parent)
+            import logging
+            logger = logging.getLogger(__name__)
+            
+            logger.info("=== GLBViewerWidget.__init__() called ===")
             self.mesh = None
             # Check OpenGL availability at runtime (always re-check)
             self.opengl_available = check_opengl_available()
+            logger.info(f"OpenGL available check result: {self.opengl_available}")
+            
             # Log for debugging
             if not self.opengl_available:
-                import logging
-                logging.warning("OpenGL not available - using fallback viewer. Please restart the application after installing PyOpenGL.")
+                logger.warning("⚠ OpenGL not available - will use fallback Trimesh viewer")
+                logger.warning("   Install PyOpenGL: pip install PyOpenGL PyOpenGL-accelerate")
+                logger.warning("   Then restart the application")
+            else:
+                logger.info("✓ OpenGL is available - will use embedded OpenGL viewer")
             self.init_ui()
         
         def init_ui(self):
@@ -1068,6 +1269,13 @@ if PYQT6_AVAILABLE:
             reset_btn.clicked.connect(self.reset_view)
             controls_layout.addWidget(reset_btn)
             
+            # Auto-rotation toggle button
+            self.auto_rotate_btn = QPushButton("Auto Rotate / Авто вращение")
+            self.auto_rotate_btn.setCheckable(True)
+            self.auto_rotate_btn.setStyleSheet(get_button_style('secondary'))
+            self.auto_rotate_btn.clicked.connect(self.toggle_auto_rotate)
+            controls_layout.addWidget(self.auto_rotate_btn)
+            
             controls_layout.addWidget(QLabel("Zoom / Масштаб:"))
             self.zoom_slider = QSlider(Qt.Orientation.Horizontal)
             self.zoom_slider.setMinimum(10)
@@ -1076,8 +1284,16 @@ if PYQT6_AVAILABLE:
             self.zoom_slider.valueChanged.connect(self.on_zoom_changed)
             controls_layout.addWidget(self.zoom_slider)
             
-            # Add hint about mouse controls
-            hint_label = QLabel("Mouse: Left Drag = Rotate | Right/Shift+Left = Pan | Wheel = Zoom")
+            controls_layout.addWidget(QLabel("Rotate Speed / Скорость вращения:"))
+            self.rotate_speed_slider = QSlider(Qt.Orientation.Horizontal)
+            self.rotate_speed_slider.setMinimum(1)  # 0.1 degrees per frame
+            self.rotate_speed_slider.setMaximum(50)  # 5.0 degrees per frame
+            self.rotate_speed_slider.setValue(5)  # Default: 0.5 degrees per frame
+            self.rotate_speed_slider.valueChanged.connect(self.on_rotate_speed_changed)
+            controls_layout.addWidget(self.rotate_speed_slider)
+            
+            # Add hint about controls
+            hint_label = QLabel("Mouse: Left Drag = Rotate | Right/Shift+Left = Pan | Wheel = Zoom | Arrow Keys = Rotate | Space = Auto Rotate")
             hint_label.setStyleSheet(f"""
                 QLabel {{
                     color: {COLORS['text_secondary']};
@@ -1092,17 +1308,24 @@ if PYQT6_AVAILABLE:
             layout.addWidget(controls)
             
             # 3D Viewer - create OpenGL widget if available
+            import logging
+            logger = logging.getLogger(__name__)
+            
             if self.opengl_available:
+                logger.info("Creating embedded OpenGL viewer widget...")
                 self.viewer = GLBViewerOpenGLWidget(self)  # Set parent to embed in widget
                 # Set size policy to expand and fill available space
                 self.viewer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
                 # Ensure widget is shown when tab becomes visible
                 self.viewer.setVisible(True)
+                logger.info("✓ Embedded OpenGL viewer widget created successfully")
             else:
+                logger.warning("Creating fallback placeholder widget (OpenGL not available)...")
                 # Fallback: create a placeholder widget
                 self.viewer = QLabel("OpenGL not available. Please restart the application after installing PyOpenGL.", self)
                 self.viewer.setAlignment(Qt.AlignmentFlag.AlignCenter)
                 self.viewer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+                logger.warning("⚠ Using placeholder widget - no 3D rendering available")
             layout.addWidget(self.viewer, 1)  # Add stretch factor to make viewer take most space
             
             # Info label
@@ -1119,14 +1342,47 @@ if PYQT6_AVAILABLE:
             """)
             layout.addWidget(self.info_label)
         
-        def load_mesh(self, mesh):
-            """Load mesh into viewer."""
+        def load_mesh(self, mesh, auto_open_viewer=False):
+            """Load mesh into viewer. Works for both GLB and IFC files.
+            
+            Args:
+                mesh: trimesh.Trimesh object to load
+                auto_open_viewer: If True, automatically open Trimesh viewer (ignored for OpenGL viewer)
+            """
+            import logging
+            logger = logging.getLogger(__name__)
+            
+            logger.info("=== GLBViewerWidget.load_mesh() called ===")
+            logger.info(f"OpenGL available: {self.opengl_available}")
+            logger.info(f"Mesh provided: {mesh is not None}")
+            if mesh is not None:
+                logger.info(f"Mesh has {len(mesh.vertices):,} vertices, {len(mesh.faces):,} faces")
+            
+            # Note: auto_open_viewer is ignored for OpenGL viewer (only used by Trimesh fallback)
+            if auto_open_viewer:
+                logger.debug("auto_open_viewer=True (ignored for OpenGL viewer)")
+            
             self.mesh = mesh
-            if self.opengl_available and hasattr(self.viewer, 'set_mesh'):
-                self.viewer.set_mesh(mesh)
-            elif not self.opengl_available:
+            if self.opengl_available:
+                logger.info("✓ OpenGL is available - using embedded OpenGL viewer")
+                if hasattr(self.viewer, 'set_mesh'):
+                    logger.info("✓ Viewer has set_mesh() method - calling it")
+                    try:
+                        self.viewer.set_mesh(mesh)
+                        logger.info("✓ set_mesh() called successfully on OpenGL viewer")
+                    except Exception as e:
+                        logger.error(f"❌ Error calling set_mesh() on OpenGL viewer: {e}", exc_info=True)
+                else:
+                    logger.error(f"❌ Viewer does not have set_mesh() method")
+                    logger.error(f"   Viewer type: {type(self.viewer).__name__}")
+                    logger.error(f"   Viewer attributes: {[attr for attr in dir(self.viewer) if not attr.startswith('_')]}")
+            else:
+                logger.warning("⚠ OpenGL not available - using fallback viewer")
+                logger.warning("   This means PyOpenGL is not installed or OpenGL context failed")
+                logger.warning("   Install with: pip install PyOpenGL PyOpenGL-accelerate")
                 # If OpenGL not available, show message
-                self.viewer.setText(f"OpenGL not available.\nMesh loaded: {len(mesh.vertices):,} vertices, {len(mesh.faces):,} faces\nPlease restart the application.")
+                if hasattr(self.viewer, 'setText'):
+                    self.viewer.setText(f"OpenGL not available.\nMesh loaded: {len(mesh.vertices):,} vertices, {len(mesh.faces):,} faces\nPlease restart the application after installing PyOpenGL.")
             
             if mesh is not None:
                 info = f"Vertices: {len(mesh.vertices):,}, Faces: {len(mesh.faces):,} / Вершин: {len(mesh.vertices):,}, Граней: {len(mesh.faces):,}"
@@ -1167,6 +1423,12 @@ if PYQT6_AVAILABLE:
         def reset_view(self):
             """Reset view to default."""
             if self.opengl_available and hasattr(self.viewer, 'azimuth'):
+                # Stop auto-rotation when resetting
+                if hasattr(self.viewer, 'auto_rotate') and self.viewer.auto_rotate:
+                    self.viewer.toggle_auto_rotate()
+                    self.auto_rotate_btn.setChecked(False)
+                    self.auto_rotate_btn.setText("Auto Rotate / Авто вращение")
+                
                 self.viewer.azimuth = 45.0
                 self.viewer.elevation = 30.0
                 self.viewer.distance = self.viewer.base_distance if hasattr(self.viewer, 'base_distance') else 5.0
@@ -1187,6 +1449,24 @@ if PYQT6_AVAILABLE:
                 zoom_ratio = value / 50.0
                 self.viewer.distance = self.viewer.base_distance * zoom_ratio
                 self.viewer.update()
+        
+        def toggle_auto_rotate(self):
+            """Toggle auto-rotation on/off."""
+            if self.opengl_available and hasattr(self.viewer, 'toggle_auto_rotate'):
+                is_enabled = self.viewer.toggle_auto_rotate()
+                # Update button state
+                self.auto_rotate_btn.setChecked(is_enabled)
+                if is_enabled:
+                    self.auto_rotate_btn.setText("Stop Rotate / Остановить")
+                else:
+                    self.auto_rotate_btn.setText("Auto Rotate / Авто вращение")
+        
+        def on_rotate_speed_changed(self, value):
+            """Handle rotation speed slider change."""
+            if self.opengl_available and hasattr(self.viewer, 'set_rotation_speed'):
+                # Convert slider value (1-50) to speed (0.1-5.0 degrees per frame)
+                speed = value / 10.0
+                self.viewer.set_rotation_speed(speed)
 
 else:
     # Fallback viewer widget (when OpenGL not available)
@@ -1735,6 +2015,7 @@ else:
         def _create_trimesh_scene(self):
             """Create a trimesh scene with main mesh and highlighted object (if any). Works for windows and other objects."""
             import trimesh
+            import numpy as np
             import logging
             logger = logging.getLogger(__name__)
             
@@ -1747,13 +2028,78 @@ else:
                 logger.error("Cannot create Trimesh scene: Mesh has no vertices")
                 raise ValueError("Mesh has no vertices - cannot create scene")
             
+            # Create a copy of the mesh for better visualization
+            # Add professional colors and materials
+            display_mesh = self.mesh.copy()
+            
+            # Apply professional color scheme to main building mesh
+            # Light gray/blue tint for building surfaces
+            try:
+                # Always apply professional colors for consistent appearance
+                # Check if mesh has meaningful colors (not just default)
+                has_meaningful_colors = False
+                try:
+                    if hasattr(display_mesh.visual, 'face_colors') and display_mesh.visual.face_colors is not None:
+                        colors = display_mesh.visual.face_colors
+                        if len(colors) > 0:
+                            # Check if colors are varied (not all the same)
+                            if len(colors.shape) == 2 and colors.shape[0] > 1:
+                                # Check if there's variation in colors
+                                color_variance = np.var(colors[:, :3], axis=0).sum()
+                                if color_variance > 100:  # Has meaningful color variation
+                                    has_meaningful_colors = True
+                except:
+                    pass
+                
+                # Apply our professional color scheme (overwrite if no meaningful colors exist)
+                if not has_meaningful_colors:
+                    # Create a nice light gray-blue color for the building
+                    face_count = len(display_mesh.faces)
+                    # Light gray-blue: RGB(200, 210, 220) with slight variation for depth perception
+                    base_color = np.array([200, 210, 220], dtype=np.float32)
+                    
+                    # Add slight variation based on face normals for better 3D perception
+                    try:
+                        # Ensure face normals are calculated
+                        if not hasattr(display_mesh, 'face_normals') or display_mesh.face_normals is None:
+                            # Trimesh will calculate normals automatically when accessed
+                            _ = display_mesh.face_normals  # Trigger calculation
+                        
+                        if hasattr(display_mesh, 'face_normals') and display_mesh.face_normals is not None and len(display_mesh.face_normals) == face_count:
+                            # Use face normals to add subtle shading
+                            normals = display_mesh.face_normals
+                            # Calculate lighting factor based on normal direction (simulate top-down lighting)
+                            # Assume light comes from above (0, 0, 1)
+                            light_dir = np.array([0.3, 0.3, 1.0])
+                            light_dir = light_dir / np.linalg.norm(light_dir)
+                            # Dot product gives lighting intensity
+                            lighting = np.clip(np.dot(normals, light_dir), 0.3, 1.0)
+                            lighting = lighting.reshape(-1, 1)
+                            # Apply lighting to base color
+                            colors = (base_color * lighting).astype(np.uint8)
+                            colors = np.hstack([colors, np.full((face_count, 1), 255, dtype=np.uint8)])
+                        else:
+                            # Simple uniform color
+                            colors = np.tile(np.append(base_color.astype(np.uint8), 255), (face_count, 1))
+                    except Exception as norm_error:
+                        logger.debug(f"Could not calculate lighting: {norm_error}, using uniform color")
+                        # Simple uniform color
+                        colors = np.tile(np.append(base_color.astype(np.uint8), 255), (face_count, 1))
+                    
+                    display_mesh.visual.face_colors = colors
+                    logger.info("Applied professional color scheme with lighting to building mesh")
+                else:
+                    logger.info("Mesh already has meaningful colors, keeping original")
+            except Exception as e:
+                logger.debug(f"Could not apply colors to mesh: {e}, using default")
+            
             # Create scene
             scene = trimesh.Scene()
             
             # Add main mesh to scene (CRITICAL - this is the IFC/GLB model)
             try:
-                scene.add_geometry(self.mesh, node_name='building')
-                logger.info(f"Added main mesh to scene: {len(self.mesh.vertices):,} vertices, {len(self.mesh.faces):,} faces")
+                scene.add_geometry(display_mesh, node_name='building')
+                logger.info(f"Added main mesh to scene: {len(display_mesh.vertices):,} vertices, {len(display_mesh.faces):,} faces")
             except Exception as e:
                 logger.error(f"Failed to add main mesh to scene: {e}")
                 raise
@@ -1803,6 +2149,9 @@ else:
                         scene.add_geometry(object_mesh, node_name=f'highlighted_{object_id}')
                 else:
                     logger.warning(f"Object mesh not available for {object_id}")
+            
+            # Scene will be automatically centered and scaled by Trimesh viewer
+            # The viewer handles camera positioning automatically
             
             logger.info(f"Trimesh scene created with {len(scene.geometry)} geometry object(s)")
             return scene
