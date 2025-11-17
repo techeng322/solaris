@@ -62,11 +62,16 @@ if PYQT6_AVAILABLE:
             self.base_distance = 5.0  # Base distance for auto-fit
             # Window highlighting
             self.building = None  # Store building for window access
-            self.highlighted_window = None  # Currently highlighted window
-            self.window_meshes = {}  # Cache of window geometry meshes
+            self.highlighted_window = None  # Currently highlighted window/space/door
+            self.window_meshes = {}  # Cache of window/space/door geometry meshes
+            self.highlight_is_space = False  # Track if current highlight is a space (for red color)
+            self.highlight_is_door = False  # Track if current highlight is a door (for green color)
             
         def set_mesh(self, mesh):
             """Set the mesh to display."""
+            import logging
+            logger = logging.getLogger(__name__)
+            
             self.mesh = mesh
             if mesh is not None:
                 # Calculate center and scale
@@ -87,61 +92,191 @@ if PYQT6_AVAILABLE:
                         # Reset pan when loading new model
                         self.pan_x = 0.0
                         self.pan_y = 0.0
-            self.update()
+                    logger.info(f"Mesh set: {len(vertices):,} vertices, {len(mesh.faces):,} faces")
+                else:
+                    logger.warning("Mesh has no vertices")
+            else:
+                logger.warning("Mesh is None")
+            
+            # Force update - ensure widget is visible and OpenGL context is ready
+            # Only make context current if widget is visible (otherwise it will fail)
+            if self.isVisible():
+                try:
+                    self.makeCurrent()  # Ensure OpenGL context is current
+                except Exception as e:
+                    logger.warning(f"Could not make OpenGL context current: {e}")
+            self.update()  # Trigger repaint
         
         def set_building(self, building):
             """Set building data for window highlighting."""
             self.building = building
             self.window_meshes = {}  # Clear cache when building changes
             self.highlighted_window = None
+            self.highlight_is_space = False
+            self.highlight_is_door = False
             self.update()
         
         def highlight_window(self, window):
-            """Highlight a specific window or object with blue colored surface."""
+            """Highlight a specific window, space, door, or object with colored surface (blue for windows, red for spaces, green for doors)."""
             import logging
             logger = logging.getLogger(__name__)
             
             if window is None:
                 self.highlighted_window = None
+                self.highlight_is_space = False
+                self.highlight_is_door = False
                 logger.info("Object highlight cleared")
-                self.update()
+                # Ensure widget is visible and update
+                if self.isVisible():
+                    self.update()
+                return
+            
+            # DIAGNOSTIC: Log object type and attributes
+            logger.info(f"=== DOOR HIGHLIGHT DIAGNOSTIC ===")
+            logger.info(f"Object type: {type(window).__name__}")
+            logger.info(f"Object class: {window.__class__}")
+            logger.info(f"Has 'is_a' method: {hasattr(window, 'is_a')}")
+            if hasattr(window, 'is_a'):
+                logger.info(f"is_a callable: {callable(window.is_a)}")
+            
+            # Check if this is an IFC element (space, door, etc.)
+            is_ifc_space = False
+            is_ifc_door = False
+            if hasattr(window, 'is_a') and callable(window.is_a):
+                try:
+                    is_ifc_space = window.is_a("IfcSpace")
+                    is_ifc_door = window.is_a("IfcDoor")
+                    logger.info(f"Using is_a() method: is_ifc_space={is_ifc_space}, is_ifc_door={is_ifc_door}")
+                except Exception as e:
+                    logger.warning(f"Error calling is_a() method: {e}")
+            elif hasattr(window, '__class__'):
+                class_str = str(window.__class__)
+                is_ifc_space = 'IfcSpace' in class_str
+                is_ifc_door = 'IfcDoor' in class_str
+                logger.info(f"Using class string check: class_str={class_str}, is_ifc_space={is_ifc_space}, is_ifc_door={is_ifc_door}")
+            else:
+                logger.warning(f"Object has no 'is_a' method or '__class__' attribute")
+            
+            logger.info(f"Final detection: is_ifc_space={is_ifc_space}, is_ifc_door={is_ifc_door}")
+            
+            # Get object ID
+            obj_id = None
+            if hasattr(window, 'GlobalId'):
+                obj_id = window.GlobalId
+                logger.info(f"Found GlobalId: {obj_id}")
+            elif hasattr(window, 'id'):
+                if callable(window.id):
+                    obj_id = str(window.id())
+                else:
+                    obj_id = str(window.id)
+                logger.info(f"Found id (callable={callable(window.id) if hasattr(window, 'id') else 'N/A'}): {obj_id}")
+            
+            if obj_id is None:
+                logger.error(f"❌ ISSUE #1: Can't find the object on the model - Object {type(window)} does not have identifiable ID (no GlobalId or id attribute)")
+                logger.error(f"   Object attributes: {dir(window)}")
+                return
+            else:
+                logger.info(f"✓ Object ID found: {obj_id}")
+            
+            # Check if widget is visible - if not, store highlight for later
+            if not self.isVisible():
+                obj_type = 'space' if is_ifc_space else ('door' if is_ifc_door else 'object')
+                logger.info(f"Widget not visible - storing highlight for {obj_type} {obj_id} to apply when visible")
+                self.highlighted_window = window
+                # Still create the mesh so it's ready when widget becomes visible
+                if obj_id not in self.window_meshes:
+                    if is_ifc_space:
+                        space_mesh = self._create_space_mesh_from_ifc(window)
+                        if space_mesh:
+                            self.window_meshes[obj_id] = space_mesh
+                    elif is_ifc_door:
+                        door_mesh = self._create_door_mesh_from_ifc(window)
+                        if door_mesh:
+                            self.window_meshes[obj_id] = door_mesh
+                    else:
+                        window_mesh = self._create_window_mesh(window)
+                        if window_mesh:
+                            self.window_meshes[obj_id] = window_mesh
                 return
             
             # Check if shaders are initialized (OpenGL context must be ready)
             if self.shader_program is None or self.shader_program_colored is None:
                 logger.warning("OpenGL shaders not initialized yet - cannot highlight. Widget may need to be visible first.")
-                # Store the window to highlight later when shaders are ready
+                # Store the object to highlight later when shaders are ready
                 self.highlighted_window = window
+                # Still create the mesh so it's ready
+                if obj_id not in self.window_meshes:
+                    if is_ifc_space:
+                        space_mesh = self._create_space_mesh_from_ifc(window)
+                        if space_mesh:
+                            self.window_meshes[obj_id] = space_mesh
+                    elif is_ifc_door:
+                        door_mesh = self._create_door_mesh_from_ifc(window)
+                        if door_mesh:
+                            self.window_meshes[obj_id] = door_mesh
+                    else:
+                        window_mesh = self._create_window_mesh(window)
+                        if window_mesh:
+                            self.window_meshes[obj_id] = window_mesh
                 return
             
             # Check if main mesh is loaded
+            obj_type = 'space' if is_ifc_space else ('door' if is_ifc_door else 'object')
             if self.mesh is None or len(self.mesh.vertices) == 0:
-                logger.warning(f"Cannot highlight object {getattr(window, 'id', 'unknown')}: No mesh loaded in 3D viewer")
+                logger.warning(f"Cannot highlight {obj_type} {obj_id}: No mesh loaded in 3D viewer")
                 return
             
-            # Check if object has required attributes (id, center, normal, size)
-            if not hasattr(window, 'id'):
-                logger.warning(f"Object {type(window)} does not have 'id' attribute - cannot highlight")
-                return
-            
-            logger.info(f"Highlighting object: {window.id} (type: {type(window).__name__})")
+            logger.info(f"Highlighting {obj_type}: {obj_id} (type: {type(window).__name__})")
             self.highlighted_window = window
             
-            # Generate window mesh if not cached
-            if window.id not in self.window_meshes:
-                logger.debug(f"Creating mesh for object {window.id}")
-                window_mesh = self._create_window_mesh(window)
-                self.window_meshes[window.id] = window_mesh
-                if window_mesh is None:
-                    logger.warning(f"Failed to create mesh for object {window.id} - highlight may not be visible")
+            # Generate mesh if not cached
+            if obj_id not in self.window_meshes:
+                logger.info(f"Creating mesh for {obj_type} {obj_id}")
+                if is_ifc_space:
+                    space_mesh = self._create_space_mesh_from_ifc(window)
+                    self.window_meshes[obj_id] = space_mesh
+                    if space_mesh is None:
+                        logger.error(f"❌ ISSUE #2: Error on highlight part - Failed to create mesh for space {obj_id}")
+                        logger.error(f"   This means geometry extraction failed. Check logs above for details.")
+                    else:
+                        logger.info(f"✓ Created mesh for space {obj_id} with {len(space_mesh.vertices)} vertices, {len(space_mesh.faces)} faces")
+                elif is_ifc_door:
+                    logger.info(f"Attempting to create door mesh for {obj_id}...")
+                    door_mesh = self._create_door_mesh_from_ifc(window)
+                    self.window_meshes[obj_id] = door_mesh
+                    if door_mesh is None:
+                        logger.error(f"❌ ISSUE #2: Error on highlight part - Failed to create mesh for door {obj_id}")
+                        logger.error(f"   This means geometry extraction failed. Check logs above for details.")
+                        logger.error(f"   Door element: {window}")
+                        logger.error(f"   Door GlobalId: {getattr(window, 'GlobalId', 'N/A')}")
+                    else:
+                        logger.info(f"✓ Created mesh for door {obj_id} with {len(door_mesh.vertices)} vertices, {len(door_mesh.faces)} faces")
                 else:
-                    logger.info(f"Created mesh for object {window.id} with {len(window_mesh.vertices)} vertices, {len(window_mesh.faces)} faces")
+                    window_mesh = self._create_window_mesh(window)
+                    self.window_meshes[obj_id] = window_mesh
+                    if window_mesh is None:
+                        logger.error(f"❌ ISSUE #2: Error on highlight part - Failed to create mesh for object {obj_id}")
+                    else:
+                        logger.info(f"✓ Created mesh for object {obj_id} with {len(window_mesh.vertices)} vertices, {len(window_mesh.faces)} faces")
             else:
-                logger.debug(f"Using cached mesh for object {window.id}")
+                logger.info(f"Using cached mesh for {obj_type} {obj_id}")
+                cached_mesh = self.window_meshes[obj_id]
+                if cached_mesh is None:
+                    logger.error(f"❌ ISSUE #2: Error on highlight part - Cached mesh is None for {obj_id}")
+                else:
+                    logger.info(f"✓ Cached mesh available: {len(cached_mesh.vertices)} vertices, {len(cached_mesh.faces)} faces")
+            
+            # Store highlight type for color selection
+            self.highlight_is_space = is_ifc_space
+            self.highlight_is_door = is_ifc_door
             
             # Force update to redraw with highlight
-            self.update()
-            logger.info(f"Update called for object highlight: {window.id}")
+            try:
+                self.makeCurrent()  # Ensure context is current
+            except Exception as e:
+                logger.warning(f"Could not make OpenGL context current: {e}")
+            self.update()  # Trigger repaint
+            logger.info(f"Update called for {obj_type} highlight: {obj_id}")
         
         def _create_window_mesh(self, window):
             """Create a trimesh representation of a window or object from its properties."""
@@ -240,74 +375,313 @@ if PYQT6_AVAILABLE:
             window_mesh = trimesh.Trimesh(vertices=vertices, faces=faces)
             return window_mesh
         
+        def _create_space_mesh_from_ifc(self, space_element):
+            """Create a trimesh representation of an IFC space (room) from its geometry."""
+            import trimesh
+            import logging
+            logger = logging.getLogger(__name__)
+            
+            try:
+                # Try to extract geometry from IFC space element using ifcopenshell
+                import ifcopenshell
+                import ifcopenshell.geom as geom
+                
+                # Create geometry settings
+                settings = geom.settings()
+                try:
+                    if hasattr(settings, 'USE_WORLD_COORDS'):
+                        settings.set(settings.USE_WORLD_COORDS, True)
+                except:
+                    pass
+                
+                # Create shape from space element
+                shape = geom.create_shape(settings, space_element)
+                if not shape:
+                    logger.warning(f"Could not create shape for space {getattr(space_element, 'GlobalId', space_element.id())}")
+                    return None
+                
+                # Get geometry from shape
+                geometry = shape.geometry
+                if not geometry:
+                    logger.warning(f"Space {getattr(space_element, 'GlobalId', space_element.id())} has no geometry")
+                    return None
+                
+                # Extract vertices and faces
+                vertices = None
+                faces = None
+                
+                # Method 1: Direct access to geometry.verts and geometry.faces
+                if hasattr(geometry, 'verts') and hasattr(geometry, 'faces'):
+                    try:
+                        verts = geometry.verts
+                        faces_data = geometry.faces
+                        
+                        # Convert to numpy arrays
+                        vertices = np.array(verts, dtype=np.float64)
+                        # Ensure vertices are in shape (n, 3)
+                        if len(vertices.shape) == 1:
+                            if len(vertices) % 3 == 0:
+                                vertices = vertices.reshape(-1, 3)
+                            else:
+                                logger.warning(f"Invalid vertex count: {len(vertices)} (not divisible by 3)")
+                                return None
+                        elif len(vertices.shape) == 2 and vertices.shape[1] != 3:
+                            logger.warning(f"Invalid vertex shape: {vertices.shape}")
+                            return None
+                        
+                        faces = np.array(faces_data, dtype=np.int32)
+                        # Ensure faces are in shape (n, 3)
+                        if len(faces.shape) == 1:
+                            if len(faces) % 3 == 0:
+                                faces = faces.reshape(-1, 3)
+                            else:
+                                logger.warning(f"Invalid face count: {len(faces)} (not divisible by 3)")
+                                return None
+                        elif len(faces.shape) == 2 and faces.shape[1] != 3:
+                            logger.warning(f"Invalid face shape: {faces.shape}")
+                            return None
+                    except Exception as e:
+                        logger.warning(f"Failed to extract geometry using standard API: {e}")
+                        return None
+                
+                # Create mesh if we have valid data
+                if vertices is not None and faces is not None and len(vertices) > 0 and len(faces) > 0:
+                    try:
+                        # Validate face indices
+                        if len(faces) > 0:
+                            max_vertex_idx = np.max(faces)
+                            if max_vertex_idx >= len(vertices):
+                                logger.warning(f"Face indices out of range: max index {max_vertex_idx}, but only {len(vertices)} vertices")
+                                return None
+                        
+                        space_mesh = trimesh.Trimesh(vertices=vertices, faces=faces)
+                        logger.info(f"Created space mesh with {len(vertices)} vertices, {len(faces)} faces")
+                        return space_mesh
+                    except Exception as mesh_error:
+                        logger.warning(f"Failed to create trimesh from space geometry: {mesh_error}")
+                        return None
+                else:
+                    logger.warning(f"Could not extract valid geometry for space {getattr(space_element, 'GlobalId', space_element.id())}")
+                    return None
+                    
+            except ImportError:
+                logger.warning("ifcopenshell.geom not available - cannot extract space geometry")
+                return None
+            except Exception as e:
+                logger.warning(f"Error creating space mesh from IFC: {e}", exc_info=True)
+                return None
+        
+        def _create_door_mesh_from_ifc(self, door_element):
+            """Create a trimesh representation of an IFC door from its geometry."""
+            import trimesh
+            import logging
+            logger = logging.getLogger(__name__)
+            
+            door_id = getattr(door_element, 'GlobalId', None) or getattr(door_element, 'id', None)
+            logger.info(f"=== CREATING DOOR MESH ===")
+            logger.info(f"Door ID: {door_id}")
+            logger.info(f"Door type: {type(door_element).__name__}")
+            
+            try:
+                # Try to extract geometry from IFC door element using ifcopenshell
+                import ifcopenshell
+                import ifcopenshell.geom as geom
+                logger.info("✓ ifcopenshell.geom imported successfully")
+                
+                # Create geometry settings
+                settings = geom.settings()
+                try:
+                    if hasattr(settings, 'USE_WORLD_COORDS'):
+                        settings.set(settings.USE_WORLD_COORDS, True)
+                        logger.info("✓ Enabled USE_WORLD_COORDS")
+                except Exception as e:
+                    logger.debug(f"Could not set USE_WORLD_COORDS: {e}")
+                
+                # Create shape from door element
+                logger.info(f"Attempting to create shape from door element...")
+                try:
+                    shape = geom.create_shape(settings, door_element)
+                    if not shape:
+                        logger.error(f"❌ ISSUE #2: Could not create shape for door {door_id}")
+                        logger.error(f"   geom.create_shape() returned None or False")
+                        return None
+                    logger.info("✓ Shape created successfully")
+                except Exception as e:
+                    logger.error(f"❌ ISSUE #2: Exception creating shape for door {door_id}: {e}", exc_info=True)
+                    return None
+                
+                # Get geometry from shape
+                geometry = shape.geometry
+                if not geometry:
+                    logger.error(f"❌ ISSUE #2: Door {door_id} has no geometry")
+                    logger.error(f"   shape.geometry is None or empty")
+                    return None
+                logger.info("✓ Geometry extracted from shape")
+                
+                # Extract vertices and faces
+                vertices = None
+                faces = None
+                
+                # Method 1: Direct access to geometry.verts and geometry.faces
+                logger.info(f"Checking geometry attributes: has verts={hasattr(geometry, 'verts')}, has faces={hasattr(geometry, 'faces')}")
+                if hasattr(geometry, 'verts') and hasattr(geometry, 'faces'):
+                    try:
+                        verts = geometry.verts
+                        faces_data = geometry.faces
+                        logger.info(f"✓ Extracted verts and faces: {len(verts) if verts is not None else 'None'} vertices, {len(faces_data) if faces_data is not None else 'None'} faces")
+                        
+                        # Convert to numpy arrays
+                        vertices = np.array(verts, dtype=np.float64)
+                        # Ensure vertices are in shape (n, 3)
+                        if len(vertices.shape) == 1:
+                            if len(vertices) % 3 == 0:
+                                vertices = vertices.reshape(-1, 3)
+                            else:
+                                logger.error(f"❌ ISSUE #2: Invalid vertex count: {len(vertices)} (not divisible by 3)")
+                                return None
+                        elif len(vertices.shape) == 2 and vertices.shape[1] != 3:
+                            logger.error(f"❌ ISSUE #2: Invalid vertex shape: {vertices.shape}")
+                            return None
+                        
+                        faces = np.array(faces_data, dtype=np.int32)
+                        # Ensure faces are in shape (n, 3)
+                        if len(faces.shape) == 1:
+                            if len(faces) % 3 == 0:
+                                faces = faces.reshape(-1, 3)
+                            else:
+                                logger.error(f"❌ ISSUE #2: Invalid face count: {len(faces)} (not divisible by 3)")
+                                return None
+                        elif len(faces.shape) == 2 and faces.shape[1] != 3:
+                            logger.error(f"❌ ISSUE #2: Invalid face shape: {faces.shape}")
+                            return None
+                        logger.info(f"✓ Successfully converted to numpy arrays: {len(vertices)} vertices, {len(faces)} faces")
+                    except Exception as e:
+                        logger.error(f"❌ ISSUE #2: Failed to extract geometry using standard API: {e}", exc_info=True)
+                        return None
+                else:
+                    logger.error(f"❌ ISSUE #2: Geometry object missing 'verts' or 'faces' attributes")
+                    logger.error(f"   Geometry attributes: {dir(geometry)}")
+                    return None
+                
+                # Create mesh if we have valid data
+                if vertices is not None and faces is not None and len(vertices) > 0 and len(faces) > 0:
+                    try:
+                        # Validate face indices
+                        if len(faces) > 0:
+                            max_vertex_idx = np.max(faces)
+                            if max_vertex_idx >= len(vertices):
+                                logger.error(f"❌ ISSUE #2: Face indices out of range: max index {max_vertex_idx}, but only {len(vertices)} vertices")
+                                return None
+                        
+                        door_mesh = trimesh.Trimesh(vertices=vertices, faces=faces)
+                        logger.info(f"✓ Created door mesh successfully: {len(vertices)} vertices, {len(faces)} faces")
+                        logger.info(f"   Mesh bounds: {door_mesh.bounds}")
+                        logger.info(f"   Mesh center: {door_mesh.centroid}")
+                        return door_mesh
+                    except Exception as mesh_error:
+                        logger.error(f"❌ ISSUE #2: Failed to create trimesh from door geometry: {mesh_error}", exc_info=True)
+                        return None
+                else:
+                    logger.error(f"❌ ISSUE #2: Could not extract valid geometry for door {door_id}")
+                    logger.error(f"   vertices: {vertices is not None} (len={len(vertices) if vertices is not None else 0})")
+                    logger.error(f"   faces: {faces is not None} (len={len(faces) if faces is not None else 0})")
+                    return None
+                    
+            except ImportError:
+                logger.warning("ifcopenshell.geom not available - cannot extract door geometry")
+                return None
+            except Exception as e:
+                logger.warning(f"Error creating door mesh from IFC: {e}", exc_info=True)
+                return None
+        
         def initializeGL(self):
             """Initialize OpenGL."""
             from OpenGL import GL
             import logging
             logger = logging.getLogger(__name__)
             
-            GL.glEnable(GL.GL_DEPTH_TEST)
-            GL.glClearColor(0.2, 0.2, 0.3, 1.0)
-            logger.info("OpenGL initialized - shaders will be created")
-            
-            # Simple shader program for default mesh
-            vertex_shader = QOpenGLShader(QOpenGLShader.ShaderTypeBit.Vertex)
-            vertex_shader.compileSourceCode("""
-                attribute vec3 position;
-                uniform mat4 mvpMatrix;
-                void main() {
-                    gl_Position = mvpMatrix * vec4(position, 1.0);
-                }
-            """)
-            
-            fragment_shader = QOpenGLShader(QOpenGLShader.ShaderTypeBit.Fragment)
-            fragment_shader.compileSourceCode("""
-                void main() {
-                    gl_FragColor = vec4(0.8, 0.8, 0.9, 1.0);
-                }
-            """)
-            
-            self.shader_program = QOpenGLShaderProgram()
-            self.shader_program.addShader(vertex_shader)
-            self.shader_program.addShader(fragment_shader)
-            self.shader_program.link()
-            
-            # Colored shader program for window highlighting
-            vertex_shader_colored = QOpenGLShader(QOpenGLShader.ShaderTypeBit.Vertex)
-            vertex_shader_colored.compileSourceCode("""
-                attribute vec3 position;
-                uniform mat4 mvpMatrix;
-                void main() {
-                    gl_Position = mvpMatrix * vec4(position, 1.0);
-                }
-            """)
-            
-            fragment_shader_colored = QOpenGLShader(QOpenGLShader.ShaderTypeBit.Fragment)
-            fragment_shader_colored.compileSourceCode("""
-                uniform vec4 color;
-                void main() {
-                    gl_FragColor = color;
-                }
-            """)
-            
-            self.shader_program_colored = QOpenGLShaderProgram()
-            self.shader_program_colored.addShader(vertex_shader_colored)
-            self.shader_program_colored.addShader(fragment_shader_colored)
-            if not self.shader_program_colored.link():
-                import logging
-                logging.error(f"Failed to link colored shader: {self.shader_program_colored.log()}")
-            else:
-                import logging
-                logging.info("Colored shader program linked successfully")
-            
-            # If there's a pending highlight, apply it now that shaders are ready
-            if self.highlighted_window is not None:
-                import logging
-                logging.info(f"Shaders initialized - applying pending highlight for {self.highlighted_window.id}")
-                # Re-highlight to create mesh and render
-                window_to_highlight = self.highlighted_window
-                self.highlighted_window = None  # Clear first
-                self.highlight_window(window_to_highlight)  # Re-apply
+            try:
+                GL.glEnable(GL.GL_DEPTH_TEST)
+                GL.glClearColor(0.1, 0.1, 0.15, 1.0)  # Darker background to avoid white screen
+                GL.glEnable(GL.GL_CULL_FACE)
+                GL.glCullFace(GL.GL_BACK)
+                logger.info("OpenGL initialized - shaders will be created")
+                
+                # Simple shader program for default mesh
+                vertex_shader = QOpenGLShader(QOpenGLShader.ShaderTypeBit.Vertex)
+                if not vertex_shader.compileSourceCode("""
+                    attribute vec3 position;
+                    uniform mat4 mvpMatrix;
+                    void main() {
+                        gl_Position = mvpMatrix * vec4(position, 1.0);
+                    }
+                """):
+                    logger.error(f"Failed to compile vertex shader: {vertex_shader.log()}")
+                    return
+                
+                fragment_shader = QOpenGLShader(QOpenGLShader.ShaderTypeBit.Fragment)
+                if not fragment_shader.compileSourceCode("""
+                    void main() {
+                        gl_FragColor = vec4(0.8, 0.8, 0.9, 1.0);
+                    }
+                """):
+                    logger.error(f"Failed to compile fragment shader: {fragment_shader.log()}")
+                    return
+                
+                self.shader_program = QOpenGLShaderProgram()
+                self.shader_program.addShader(vertex_shader)
+                self.shader_program.addShader(fragment_shader)
+                if not self.shader_program.link():
+                    logger.error(f"Failed to link shader program: {self.shader_program.log()}")
+                    return
+                else:
+                    logger.info("Main shader program linked successfully")
+                
+                # Colored shader program for window highlighting
+                vertex_shader_colored = QOpenGLShader(QOpenGLShader.ShaderTypeBit.Vertex)
+                if not vertex_shader_colored.compileSourceCode("""
+                    attribute vec3 position;
+                    uniform mat4 mvpMatrix;
+                    void main() {
+                        gl_Position = mvpMatrix * vec4(position, 1.0);
+                    }
+                """):
+                    logger.error(f"Failed to compile colored vertex shader: {vertex_shader_colored.log()}")
+                    return
+                
+                fragment_shader_colored = QOpenGLShader(QOpenGLShader.ShaderTypeBit.Fragment)
+                if not fragment_shader_colored.compileSourceCode("""
+                    uniform vec4 color;
+                    void main() {
+                        gl_FragColor = color;
+                    }
+                """):
+                    logger.error(f"Failed to compile colored fragment shader: {fragment_shader_colored.log()}")
+                    return
+                
+                self.shader_program_colored = QOpenGLShaderProgram()
+                self.shader_program_colored.addShader(vertex_shader_colored)
+                self.shader_program_colored.addShader(fragment_shader_colored)
+                if not self.shader_program_colored.link():
+                    logger.error(f"Failed to link colored shader: {self.shader_program_colored.log()}")
+                else:
+                    logger.info("Colored shader program linked successfully")
+                
+                # If there's a pending highlight, apply it now that shaders are ready
+                if self.highlighted_window is not None:
+                    # Get object ID for logging
+                    obj_id = None
+                    if hasattr(self.highlighted_window, 'GlobalId'):
+                        obj_id = self.highlighted_window.GlobalId
+                    elif hasattr(self.highlighted_window, 'id'):
+                        obj_id = str(self.highlighted_window.id) if callable(self.highlighted_window.id) else self.highlighted_window.id
+                    logger.info(f"Shaders initialized - applying pending highlight for {obj_id}")
+                    # Re-highlight to create mesh and render
+                    window_to_highlight = self.highlighted_window
+                    self.highlighted_window = None  # Clear first
+                    self.highlight_window(window_to_highlight)  # Re-apply
+            except Exception as e:
+                logger.error(f"Error initializing OpenGL: {e}", exc_info=True)
             
         def resizeGL(self, width, height):
             """Handle resize."""
@@ -317,130 +691,178 @@ if PYQT6_AVAILABLE:
         def paintGL(self):
             """Paint the scene with orbit camera."""
             from OpenGL import GL
-            GL.glClear(GL.GL_COLOR_BUFFER_BIT | GL.GL_DEPTH_BUFFER_BIT)
+            import logging
+            logger = logging.getLogger(__name__)
             
-            if self.mesh is None or len(self.mesh.vertices) == 0:
-                return
-            
-            # Setup matrices
-            width = self.width()
-            height = self.height()
-            aspect = width / height if height > 0 else 1.0
-            
-            # Projection matrix
-            projection = QMatrix4x4()
-            projection.perspective(45.0, aspect, 0.1, 1000.0)  # Increased far plane for large models
-            
-            # View matrix - orbit camera
-            # Calculate camera position using spherical coordinates
-            azimuth_rad = np.radians(self.azimuth)
-            elevation_rad = np.radians(self.elevation)
-            
-            # Camera position in spherical coordinates
-            x = self.distance * np.cos(elevation_rad) * np.sin(azimuth_rad)
-            y = self.distance * np.sin(elevation_rad)
-            z = self.distance * np.cos(elevation_rad) * np.cos(azimuth_rad)
-            
-            camera_pos = QVector3D(x, y, z)
-            # Add pan offset to center
-            pan_offset = QVector3D(self.pan_x, self.pan_y, 0)
-            # Transform pan offset by current rotation to get world-space pan
-            # We need to rotate the pan vector based on current view orientation
-            azimuth_rad = np.radians(self.azimuth)
-            # Pan in the plane perpendicular to view direction
-            # Right vector in horizontal plane
-            right_x = np.cos(azimuth_rad)
-            right_z = -np.sin(azimuth_rad)
-            # Forward vector (we'll use this for depth pan if needed)
-            forward_x = np.sin(azimuth_rad)
-            forward_z = np.cos(azimuth_rad)
-            
-            # Apply pan in world space (right and up directions)
-            world_pan = QVector3D(
-                pan_offset.x() * right_x,
-                pan_offset.y(),
-                pan_offset.x() * right_z
-            )
-            
-            view_center = self.center + world_pan
-            up = QVector3D(0, 1, 0)  # World up vector
-            
-            # Create view matrix looking at center from camera position
-            # Camera is at view_center + camera_pos (relative to center)
-            view = QMatrix4x4()
-            view.lookAt(view_center + camera_pos, view_center, up)
-            
-            # Model matrix - just scale if needed
-            model = QMatrix4x4()
-            if self.scale_factor != 1.0:
-                model.scale(self.scale_factor)
-            
-            mvp = projection * view * model
-            
-            # Draw main mesh
-            from OpenGL import GL
-            if self.mesh is not None and len(self.mesh.vertices) > 0:
-                self.shader_program.bind()
-                self.shader_program.setUniformValue("mvpMatrix", mvp)
+            try:
+                # Ensure we have a valid OpenGL context
+                if not self.isValid():
+                    logger.warning("OpenGL context is not valid - cannot render")
+                    return
                 
-                vertices = self.mesh.vertices
-                faces = self.mesh.faces
+                # Clear with dark background to avoid white screen
+                GL.glClearColor(0.1, 0.1, 0.15, 1.0)
+                GL.glClear(GL.GL_COLOR_BUFFER_BIT | GL.GL_DEPTH_BUFFER_BIT)
                 
-                GL.glBegin(GL.GL_TRIANGLES)
-                for face in faces:
-                    for vertex_idx in face:
-                        if vertex_idx < len(vertices):
-                            v = vertices[vertex_idx]
-                            GL.glVertex3f(v[0], v[1], v[2])
-                GL.glEnd()
+                # Check if shaders are initialized
+                if self.shader_program is None:
+                    logger.debug("Shader program not initialized yet - showing background only")
+                    return
                 
-                self.shader_program.release()
-            
-            # Draw highlighted window with colored surface
-            if self.highlighted_window is not None:
-                window_mesh = self.window_meshes.get(self.highlighted_window.id)
-                if window_mesh is not None and len(window_mesh.vertices) > 0:
-                    # Check if colored shader is available
-                    if self.shader_program_colored is None:
-                        import logging
-                        logging.warning("Colored shader not initialized - cannot highlight window")
+                if self.mesh is None or len(self.mesh.vertices) == 0:
+                    # Draw a message or just show background
+                    logger.debug("No mesh loaded - showing background only")
+                    return
+                
+                # Setup matrices
+                width = self.width()
+                height = self.height()
+                aspect = width / height if height > 0 else 1.0
+                
+                # Projection matrix
+                projection = QMatrix4x4()
+                projection.perspective(45.0, aspect, 0.1, 1000.0)  # Increased far plane for large models
+                
+                # View matrix - orbit camera
+                # Calculate camera position using spherical coordinates
+                azimuth_rad = np.radians(self.azimuth)
+                elevation_rad = np.radians(self.elevation)
+                
+                # Camera position in spherical coordinates
+                x = self.distance * np.cos(elevation_rad) * np.sin(azimuth_rad)
+                y = self.distance * np.sin(elevation_rad)
+                z = self.distance * np.cos(elevation_rad) * np.cos(azimuth_rad)
+                
+                camera_pos = QVector3D(x, y, z)
+                # Add pan offset to center
+                pan_offset = QVector3D(self.pan_x, self.pan_y, 0)
+                # Transform pan offset by current rotation to get world-space pan
+                # We need to rotate the pan vector based on current view orientation
+                azimuth_rad = np.radians(self.azimuth)
+                # Pan in the plane perpendicular to view direction
+                # Right vector in horizontal plane
+                right_x = np.cos(azimuth_rad)
+                right_z = -np.sin(azimuth_rad)
+                # Forward vector (we'll use this for depth pan if needed)
+                forward_x = np.sin(azimuth_rad)
+                forward_z = np.cos(azimuth_rad)
+                
+                # Apply pan in world space (right and up directions)
+                world_pan = QVector3D(
+                    pan_offset.x() * right_x,
+                    pan_offset.y(),
+                    pan_offset.x() * right_z
+                )
+                
+                view_center = self.center + world_pan
+                up = QVector3D(0, 1, 0)  # World up vector
+                
+                # Create view matrix looking at center from camera position
+                # Camera is at view_center + camera_pos (relative to center)
+                view = QMatrix4x4()
+                view.lookAt(view_center + camera_pos, view_center, up)
+                
+                # Model matrix - just scale if needed
+                model = QMatrix4x4()
+                if self.scale_factor != 1.0:
+                    model.scale(self.scale_factor)
+                
+                mvp = projection * view * model
+                
+                # Draw main mesh
+                if self.mesh is not None and len(self.mesh.vertices) > 0:
+                    if not self.shader_program.bind():
+                        logger.error("Failed to bind shader program")
+                        return
+                    
+                    self.shader_program.setUniformValue("mvpMatrix", mvp)
+                    
+                    vertices = self.mesh.vertices
+                    faces = self.mesh.faces
+                    
+                    # Enable depth testing for proper rendering
+                    GL.glEnable(GL.GL_DEPTH_TEST)
+                    GL.glDepthFunc(GL.GL_LESS)
+                    
+                    GL.glBegin(GL.GL_TRIANGLES)
+                    for face in faces:
+                        for vertex_idx in face:
+                            if vertex_idx < len(vertices):
+                                v = vertices[vertex_idx]
+                                GL.glVertex3f(float(v[0]), float(v[1]), float(v[2]))
+                    GL.glEnd()
+                    
+                    self.shader_program.release()
+                
+                # Draw highlighted window/space with colored surface
+                if self.highlighted_window is not None:
+                    # Get object ID (works for both Window objects and IFC elements)
+                    obj_id = None
+                    if hasattr(self.highlighted_window, 'GlobalId'):
+                        obj_id = self.highlighted_window.GlobalId
+                    elif hasattr(self.highlighted_window, 'id'):
+                        obj_id = str(self.highlighted_window.id) if callable(self.highlighted_window.id) else self.highlighted_window.id
+                    
+                    if obj_id is None:
+                        logger.warning("❌ ISSUE #1: Highlighted object has no identifiable ID")
                     else:
-                        try:
-                            # Use colored shader
-                            if not self.shader_program_colored.bind():
+                        window_mesh = self.window_meshes.get(obj_id)
+                        if window_mesh is None:
+                            logger.error(f"❌ ISSUE #3: Can't see the highlight part - Mesh not found in cache for {obj_id}")
+                            logger.error(f"   Available cached meshes: {list(self.window_meshes.keys())}")
+                        elif len(window_mesh.vertices) == 0:
+                            logger.error(f"❌ ISSUE #3: Can't see the highlight part - Mesh has no vertices for {obj_id}")
+                        else:
+                            logger.debug(f"✓ Rendering highlight for {obj_id}: {len(window_mesh.vertices)} vertices, {len(window_mesh.faces)} faces")
+                        if window_mesh is not None and len(window_mesh.vertices) > 0:
+                            # Check if colored shader is available
+                            if self.shader_program_colored is None:
                                 import logging
-                                logging.error("Failed to bind colored shader for window highlighting")
+                                logging.warning("Colored shader not initialized - cannot highlight window")
                             else:
-                                self.shader_program_colored.setUniformValue("mvpMatrix", mvp)
-                                
-                                # Highlight color: bright blue for visibility
-                                color_vec = QVector4D(0.0, 0.5, 1.0, 0.8)  # Blue, semi-transparent
-                                self.shader_program_colored.setUniformValue("color", color_vec)
-                                
-                                # Enable blending for transparency
-                                GL.glEnable(GL.GL_BLEND)
-                                GL.glBlendFunc(GL.GL_SRC_ALPHA, GL.GL_ONE_MINUS_SRC_ALPHA)
-                                
-                                # Draw window mesh
-                                vertices = window_mesh.vertices
-                                faces = window_mesh.faces
-                                
-                                GL.glBegin(GL.GL_TRIANGLES)
-                                for face in faces:
-                                    for vertex_idx in face:
-                                        if vertex_idx < len(vertices):
-                                            v = vertices[vertex_idx]
-                                            GL.glVertex3f(v[0], v[1], v[2])
-                                GL.glEnd()
-                                
-                                GL.glDisable(GL.GL_BLEND)
-                                self.shader_program_colored.release()
-                        except Exception as e:
+                                try:
+                                    # Use colored shader
+                                    if not self.shader_program_colored.bind():
+                                        import logging
+                                        logging.error("Failed to bind colored shader for window highlighting")
+                                    else:
+                                        self.shader_program_colored.setUniformValue("mvpMatrix", mvp)
+                                        
+                                        # Highlight color: red for spaces, green for doors, blue for windows
+                                        if getattr(self, 'highlight_is_space', False):
+                                            color_vec = QVector4D(1.0, 0.0, 0.0, 0.6)  # Red, semi-transparent for spaces
+                                        elif getattr(self, 'highlight_is_door', False):
+                                            color_vec = QVector4D(0.0, 1.0, 0.0, 0.6)  # Green, semi-transparent for doors
+                                        else:
+                                            color_vec = QVector4D(0.0, 0.5, 1.0, 0.8)  # Blue, semi-transparent for windows
+                                        self.shader_program_colored.setUniformValue("color", color_vec)
+                                        
+                                        # Enable blending for transparency
+                                        GL.glEnable(GL.GL_BLEND)
+                                        GL.glBlendFunc(GL.GL_SRC_ALPHA, GL.GL_ONE_MINUS_SRC_ALPHA)
+                                        
+                                        # Draw window/door/space mesh
+                                        vertices = window_mesh.vertices
+                                        faces = window_mesh.faces
+                                        
+                                        GL.glBegin(GL.GL_TRIANGLES)
+                                        for face in faces:
+                                            for vertex_idx in face:
+                                                if vertex_idx < len(vertices):
+                                                    v = vertices[vertex_idx]
+                                                    GL.glVertex3f(float(v[0]), float(v[1]), float(v[2]))
+                                        GL.glEnd()
+                                        
+                                        GL.glDisable(GL.GL_BLEND)
+                                        self.shader_program_colored.release()
+                                except Exception as e:
+                                    import logging
+                                    logging.error(f"Error rendering highlighted window: {e}", exc_info=True)
+                        else:
                             import logging
-                            logging.error(f"Error rendering highlighted window: {e}", exc_info=True)
-                else:
-                    import logging
-                    logging.debug(f"Window mesh not available for highlighting: {self.highlighted_window.id}")
+                            logging.debug(f"Object mesh not available for highlighting: {obj_id}")
+            except Exception as e:
+                logger.error(f"Error in paintGL: {e}", exc_info=True)
         
         def mousePressEvent(self, event):
             """Handle mouse press for rotation and panning."""
@@ -529,6 +951,36 @@ if PYQT6_AVAILABLE:
             self.distance = max(min_distance, min(max_distance, self.distance))
             
             self.update()
+        
+        def showEvent(self, event):
+            """Handle widget show event - ensure OpenGL context is ready and render."""
+            super().showEvent(event)
+            import logging
+            logger = logging.getLogger(__name__)
+            
+            # When widget becomes visible, ensure OpenGL context is ready
+            if self.isValid():
+                try:
+                    self.makeCurrent()
+                    # If we have a pending highlight, apply it now
+                    if self.highlighted_window is not None:
+                        # Get object ID for logging
+                        obj_id = None
+                        if hasattr(self.highlighted_window, 'GlobalId'):
+                            obj_id = self.highlighted_window.GlobalId
+                        elif hasattr(self.highlighted_window, 'id'):
+                            obj_id = str(self.highlighted_window.id) if callable(self.highlighted_window.id) else self.highlighted_window.id
+                        logger.info(f"Widget shown - applying pending highlight for {obj_id}")
+                        window_to_highlight = self.highlighted_window
+                        self.highlighted_window = None  # Clear first
+                        self.highlight_window(window_to_highlight)  # Re-apply
+                    else:
+                        # Force a repaint to show the model
+                        self.update()
+                except Exception as e:
+                    logger.warning(f"Could not make OpenGL context current on show: {e}")
+            else:
+                logger.warning("OpenGL context not valid when widget shown")
     
     class GLBViewerWidget(QWidget):
         """Widget for viewing GLB 3D models (embedded in main window)."""
@@ -644,6 +1096,8 @@ if PYQT6_AVAILABLE:
                 self.viewer = GLBViewerOpenGLWidget(self)  # Set parent to embed in widget
                 # Set size policy to expand and fill available space
                 self.viewer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+                # Ensure widget is shown when tab becomes visible
+                self.viewer.setVisible(True)
             else:
                 # Fallback: create a placeholder widget
                 self.viewer = QLabel("OpenGL not available. Please restart the application after installing PyOpenGL.", self)
@@ -850,7 +1304,7 @@ else:
             self.window_meshes = {}  # Clear cache when building changes
         
         def highlight_window(self, window):
-            """Highlight a specific object (window or any object) in Trimesh viewer. Automatically opens viewer if not already open. Works for both GLB and IFC files."""
+            """Highlight a specific object (window, space, door, or any object) in Trimesh viewer. Automatically opens viewer if not already open. Works for both GLB and IFC files."""
             import logging
             logger = logging.getLogger(__name__)
             
@@ -862,33 +1316,65 @@ else:
                     self._update_trimesh_viewer()
                 return
             
-            # Check if object has required attributes
-            if not hasattr(window, 'id'):
-                logger.warning(f"Object {type(window)} does not have 'id' attribute - cannot highlight")
+            # Check if this is an IFC element (space, door, etc.)
+            is_ifc_space = False
+            is_ifc_door = False
+            if hasattr(window, 'is_a') and callable(window.is_a):
+                try:
+                    is_ifc_space = window.is_a("IfcSpace")
+                    is_ifc_door = window.is_a("IfcDoor")
+                    logger.info(f"IFC element detection: is_ifc_space={is_ifc_space}, is_ifc_door={is_ifc_door}")
+                except Exception as e:
+                    logger.warning(f"Error calling is_a() method: {e}")
+            elif hasattr(window, '__class__'):
+                class_str = str(window.__class__)
+                is_ifc_space = 'IfcSpace' in class_str
+                is_ifc_door = 'IfcDoor' in class_str
+                logger.info(f"IFC element detection (class string): is_ifc_space={is_ifc_space}, is_ifc_door={is_ifc_door}")
+            
+            # Get object ID (works for both Window objects and IFC elements)
+            obj_id = None
+            if hasattr(window, 'GlobalId'):
+                obj_id = window.GlobalId
+            elif hasattr(window, 'id'):
+                if callable(window.id):
+                    obj_id = str(window.id())
+                else:
+                    obj_id = str(window.id)
+            
+            if obj_id is None:
+                logger.warning(f"Object {type(window)} does not have identifiable ID (no GlobalId or id attribute) - cannot highlight")
                 return
             
             # Check if mesh is available (required for highlighting)
             if self.mesh is None:
-                logger.warning(f"Cannot highlight object {getattr(window, 'id', 'unknown')}: No mesh loaded in viewer")
+                logger.warning(f"Cannot highlight object {obj_id}: No mesh loaded in viewer")
                 logger.info("Note: Make sure the model (GLB or IFC) has been loaded and mesh generation succeeded")
                 return
             
             # Verify mesh has valid data
             if not hasattr(self.mesh, 'vertices') or len(self.mesh.vertices) == 0:
-                logger.warning(f"Cannot highlight object {getattr(window, 'id', 'unknown')}: Mesh has no vertices")
+                logger.warning(f"Cannot highlight object {obj_id}: Mesh has no vertices")
                 return
             
-            logger.info(f"Object highlighted for Trimesh viewer: {window.id} (type: {type(window).__name__})")
+            obj_type = 'space' if is_ifc_space else ('door' if is_ifc_door else 'object')
+            logger.info(f"Object highlighted for Trimesh viewer: {obj_id} (type: {obj_type})")
             self.highlighted_window = window
             
-            # Generate object mesh if not cached (works for windows and other objects)
-            if window.id not in self.window_meshes:
-                object_mesh = self._create_window_mesh(window)
-                self.window_meshes[window.id] = object_mesh
-                if object_mesh is None:
-                    logger.warning(f"Failed to create mesh for object {window.id}")
+            # Generate object mesh if not cached (works for windows, spaces, doors, and other objects)
+            if obj_id not in self.window_meshes:
+                if is_ifc_space:
+                    object_mesh = self._create_space_mesh_from_ifc(window)
+                elif is_ifc_door:
+                    object_mesh = self._create_door_mesh_from_ifc(window)
                 else:
-                    logger.info(f"Created mesh for object {window.id} with {len(object_mesh.vertices)} vertices")
+                    object_mesh = self._create_window_mesh(window)
+                
+                self.window_meshes[obj_id] = object_mesh
+                if object_mesh is None:
+                    logger.warning(f"Failed to create mesh for {obj_type} {obj_id}")
+                else:
+                    logger.info(f"Created mesh for {obj_type} {obj_id} with {len(object_mesh.vertices)} vertices")
             
             # If viewer is not open, open it automatically with the highlighted object
             if not self.trimesh_viewer_open:
@@ -1021,6 +1507,231 @@ else:
             object_mesh = trimesh.Trimesh(vertices=vertices, faces=faces)
             return object_mesh
         
+        def _create_space_mesh_from_ifc(self, space_element):
+            """Create a trimesh representation of an IFC space from its geometry."""
+            import trimesh
+            import numpy as np
+            import logging
+            logger = logging.getLogger(__name__)
+            
+            try:
+                # Try to extract geometry from IFC space element using ifcopenshell
+                import ifcopenshell
+                import ifcopenshell.geom as geom
+                
+                # Create geometry settings
+                settings = geom.settings()
+                try:
+                    if hasattr(settings, 'USE_WORLD_COORDS'):
+                        settings.set(settings.USE_WORLD_COORDS, True)
+                except Exception:
+                    pass
+                
+                # Create shape from space element
+                try:
+                    shape = geom.create_shape(settings, space_element)
+                    if not shape:
+                        logger.warning(f"Could not create shape for space {getattr(space_element, 'GlobalId', space_element.id())}")
+                        return None
+                except Exception as e:
+                    logger.warning(f"Could not create shape for space {getattr(space_element, 'GlobalId', space_element.id())}: {e}")
+                    return None
+                
+                # Get geometry from shape
+                geometry = shape.geometry
+                if not geometry:
+                    logger.warning(f"Space {getattr(space_element, 'GlobalId', space_element.id())} has no geometry")
+                    return None
+                
+                # Extract vertices and faces
+                vertices = None
+                faces = None
+                
+                # Method 1: Direct access to geometry.verts and geometry.faces
+                if hasattr(geometry, 'verts') and hasattr(geometry, 'faces'):
+                    try:
+                        verts = geometry.verts
+                        faces_data = geometry.faces
+                        
+                        # Convert to numpy arrays
+                        vertices = np.array(verts, dtype=np.float64)
+                        # Ensure vertices are in shape (n, 3)
+                        if len(vertices.shape) == 1:
+                            if len(vertices) % 3 == 0:
+                                vertices = vertices.reshape(-1, 3)
+                            else:
+                                logger.warning(f"Invalid vertex count: {len(vertices)} (not divisible by 3)")
+                                return None
+                        elif len(vertices.shape) == 2 and vertices.shape[1] != 3:
+                            logger.warning(f"Invalid vertex shape: {vertices.shape}")
+                            return None
+                        
+                        faces = np.array(faces_data, dtype=np.int32)
+                        # Ensure faces are in shape (n, 3)
+                        if len(faces.shape) == 1:
+                            if len(faces) % 3 == 0:
+                                faces = faces.reshape(-1, 3)
+                            else:
+                                logger.warning(f"Invalid face count: {len(faces)} (not divisible by 3)")
+                                return None
+                        elif len(faces.shape) == 2 and faces.shape[1] != 3:
+                            logger.warning(f"Invalid face shape: {faces.shape}")
+                            return None
+                    except Exception as e:
+                        logger.warning(f"Failed to extract geometry using standard API: {e}")
+                        return None
+                
+                # Create mesh if we have valid data
+                if vertices is not None and faces is not None and len(vertices) > 0 and len(faces) > 0:
+                    try:
+                        # Validate face indices
+                        if len(faces) > 0:
+                            max_vertex_idx = np.max(faces)
+                            if max_vertex_idx >= len(vertices):
+                                logger.warning(f"Face indices out of range: max index {max_vertex_idx}, but only {len(vertices)} vertices")
+                                return None
+                        
+                        space_mesh = trimesh.Trimesh(vertices=vertices, faces=faces)
+                        logger.info(f"Created space mesh with {len(vertices)} vertices, {len(faces)} faces")
+                        return space_mesh
+                    except Exception as mesh_error:
+                        logger.warning(f"Failed to create trimesh from space geometry: {mesh_error}")
+                        return None
+                else:
+                    logger.warning(f"Could not extract valid geometry for space {getattr(space_element, 'GlobalId', space_element.id())}")
+                    return None
+                    
+            except ImportError:
+                logger.warning("ifcopenshell.geom not available - cannot extract space geometry")
+                return None
+            except Exception as e:
+                logger.warning(f"Error creating space mesh from IFC: {e}", exc_info=True)
+                return None
+        
+        def _create_door_mesh_from_ifc(self, door_element):
+            """Create a trimesh representation of an IFC door from its geometry."""
+            import trimesh
+            import numpy as np
+            import logging
+            logger = logging.getLogger(__name__)
+            
+            door_id = getattr(door_element, 'GlobalId', None) or getattr(door_element, 'id', None)
+            logger.info(f"=== CREATING DOOR MESH (Trimesh viewer) ===")
+            logger.info(f"Door ID: {door_id}")
+            logger.info(f"Door type: {type(door_element).__name__}")
+            
+            try:
+                # Try to extract geometry from IFC door element using ifcopenshell
+                import ifcopenshell
+                import ifcopenshell.geom as geom
+                logger.info("✓ ifcopenshell.geom imported successfully")
+                
+                # Create geometry settings
+                settings = geom.settings()
+                try:
+                    if hasattr(settings, 'USE_WORLD_COORDS'):
+                        settings.set(settings.USE_WORLD_COORDS, True)
+                        logger.info("✓ Enabled USE_WORLD_COORDS")
+                except Exception as e:
+                    logger.debug(f"Could not set USE_WORLD_COORDS: {e}")
+                
+                # Create shape from door element
+                logger.info(f"Attempting to create shape from door element...")
+                try:
+                    shape = geom.create_shape(settings, door_element)
+                    if not shape:
+                        logger.error(f"❌ ISSUE #2: Could not create shape for door {door_id}")
+                        logger.error(f"   geom.create_shape() returned None or False")
+                        return None
+                    logger.info("✓ Shape created successfully")
+                except Exception as e:
+                    logger.error(f"❌ ISSUE #2: Exception creating shape for door {door_id}: {e}", exc_info=True)
+                    return None
+                
+                # Get geometry from shape
+                geometry = shape.geometry
+                if not geometry:
+                    logger.error(f"❌ ISSUE #2: Door {door_id} has no geometry")
+                    logger.error(f"   shape.geometry is None or empty")
+                    return None
+                logger.info("✓ Geometry extracted from shape")
+                
+                # Extract vertices and faces
+                vertices = None
+                faces = None
+                
+                # Method 1: Direct access to geometry.verts and geometry.faces
+                logger.info(f"Checking geometry attributes: has verts={hasattr(geometry, 'verts')}, has faces={hasattr(geometry, 'faces')}")
+                if hasattr(geometry, 'verts') and hasattr(geometry, 'faces'):
+                    try:
+                        verts = geometry.verts
+                        faces_data = geometry.faces
+                        logger.info(f"✓ Extracted verts and faces: {len(verts) if verts is not None else 'None'} vertices, {len(faces_data) if faces_data is not None else 'None'} faces")
+                        
+                        # Convert to numpy arrays
+                        vertices = np.array(verts, dtype=np.float64)
+                        # Ensure vertices are in shape (n, 3)
+                        if len(vertices.shape) == 1:
+                            if len(vertices) % 3 == 0:
+                                vertices = vertices.reshape(-1, 3)
+                            else:
+                                logger.error(f"❌ ISSUE #2: Invalid vertex count: {len(vertices)} (not divisible by 3)")
+                                return None
+                        elif len(vertices.shape) == 2 and vertices.shape[1] != 3:
+                            logger.error(f"❌ ISSUE #2: Invalid vertex shape: {vertices.shape}")
+                            return None
+                        
+                        faces = np.array(faces_data, dtype=np.int32)
+                        # Ensure faces are in shape (n, 3)
+                        if len(faces.shape) == 1:
+                            if len(faces) % 3 == 0:
+                                faces = faces.reshape(-1, 3)
+                            else:
+                                logger.error(f"❌ ISSUE #2: Invalid face count: {len(faces)} (not divisible by 3)")
+                                return None
+                        elif len(faces.shape) == 2 and faces.shape[1] != 3:
+                            logger.error(f"❌ ISSUE #2: Invalid face shape: {faces.shape}")
+                            return None
+                        logger.info(f"✓ Successfully converted to numpy arrays: {len(vertices)} vertices, {len(faces)} faces")
+                    except Exception as e:
+                        logger.error(f"❌ ISSUE #2: Failed to extract geometry using standard API: {e}", exc_info=True)
+                        return None
+                else:
+                    logger.error(f"❌ ISSUE #2: Geometry object missing 'verts' or 'faces' attributes")
+                    logger.error(f"   Geometry attributes: {dir(geometry)}")
+                    return None
+                
+                # Create mesh if we have valid data
+                if vertices is not None and faces is not None and len(vertices) > 0 and len(faces) > 0:
+                    try:
+                        # Validate face indices
+                        if len(faces) > 0:
+                            max_vertex_idx = np.max(faces)
+                            if max_vertex_idx >= len(vertices):
+                                logger.error(f"❌ ISSUE #2: Face indices out of range: max index {max_vertex_idx}, but only {len(vertices)} vertices")
+                                return None
+                        
+                        door_mesh = trimesh.Trimesh(vertices=vertices, faces=faces)
+                        logger.info(f"✓ Created door mesh successfully: {len(vertices)} vertices, {len(faces)} faces")
+                        logger.info(f"   Mesh bounds: {door_mesh.bounds}")
+                        logger.info(f"   Mesh center: {door_mesh.centroid}")
+                        return door_mesh
+                    except Exception as mesh_error:
+                        logger.error(f"❌ ISSUE #2: Failed to create trimesh from door geometry: {mesh_error}", exc_info=True)
+                        return None
+                else:
+                    logger.error(f"❌ ISSUE #2: Could not extract valid geometry for door {door_id}")
+                    logger.error(f"   vertices: {vertices is not None} (len={len(vertices) if vertices is not None else 0})")
+                    logger.error(f"   faces: {faces is not None} (len={len(faces) if faces is not None else 0})")
+                    return None
+                    
+            except ImportError:
+                logger.warning("ifcopenshell.geom not available - cannot extract door geometry")
+                return None
+            except Exception as e:
+                logger.warning(f"Error creating door mesh from IFC: {e}", exc_info=True)
+                return None
+        
         def _create_trimesh_scene(self):
             """Create a trimesh scene with main mesh and highlighted object (if any). Works for windows and other objects."""
             import trimesh
@@ -1047,14 +1758,44 @@ else:
                 logger.error(f"Failed to add main mesh to scene: {e}")
                 raise
             
-            # Add highlighted object mesh if available (works for windows and other objects)
+            # Add highlighted object mesh if available (works for windows, spaces, doors, and other objects)
             if self.highlighted_window is not None:
-                object_id = getattr(self.highlighted_window, 'id', 'unknown')
+                # Get object ID (works for both Window objects and IFC elements)
+                object_id = None
+                if hasattr(self.highlighted_window, 'GlobalId'):
+                    object_id = self.highlighted_window.GlobalId
+                elif hasattr(self.highlighted_window, 'id'):
+                    if callable(self.highlighted_window.id):
+                        object_id = str(self.highlighted_window.id())
+                    else:
+                        object_id = str(self.highlighted_window.id)
+                else:
+                    object_id = 'unknown'
+                
                 object_mesh = self.window_meshes.get(object_id)
                 if object_mesh is not None:
-                    # Color the object mesh blue/cyan for highlighting
+                    # Color the object mesh: red for spaces, green for doors, blue for windows
                     try:
-                        object_mesh.visual.face_colors = [0, 128, 255, 200]  # Blue with transparency
+                        # Detect object type for color
+                        is_ifc_space = False
+                        is_ifc_door = False
+                        if hasattr(self.highlighted_window, 'is_a') and callable(self.highlighted_window.is_a):
+                            try:
+                                is_ifc_space = self.highlighted_window.is_a("IfcSpace")
+                                is_ifc_door = self.highlighted_window.is_a("IfcDoor")
+                            except Exception:
+                                pass
+                        elif hasattr(self.highlighted_window, '__class__'):
+                            class_str = str(self.highlighted_window.__class__)
+                            is_ifc_space = 'IfcSpace' in class_str
+                            is_ifc_door = 'IfcDoor' in class_str
+                        
+                        if is_ifc_space:
+                            object_mesh.visual.face_colors = [255, 0, 0, 200]  # Red with transparency for spaces
+                        elif is_ifc_door:
+                            object_mesh.visual.face_colors = [0, 255, 0, 200]  # Green with transparency for doors
+                        else:
+                            object_mesh.visual.face_colors = [0, 128, 255, 200]  # Blue with transparency for windows
                         scene.add_geometry(object_mesh, node_name=f'highlighted_{object_id}')
                         logger.info(f"Added highlighted object {object_id} to Trimesh scene")
                     except Exception as e:

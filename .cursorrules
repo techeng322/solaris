@@ -980,11 +980,9 @@ solaris/
 - **Better structure**: Clear separation between workflow functions and GUI
 - **User-friendly**: Single entry point (`run_gui.py`)
 
-**Status**: ✅ **GUI-ONLY TRANSFORMATION COMPLETE**
-
+- Working fine to import IFC file
 ## Previous Task: Window Management and Viewer Integration
 
-Status: ✅ **COMPLETE** ✅
 
 **Key Learnings Documented**:
 - Window management patterns (independent windows, focus handling)
@@ -993,4 +991,9 @@ Status: ✅ **COMPLETE** ✅
 - Logging system (GUILogHandler, logging.info() for all messages)
 - Viewer window state management (reflect current state, store file paths)
 
-**Status**: ✅ **DOCUMENTATION COMPLETE**
+
+**Status**: ✅ **GUI-ONLY TRANSFORMATION COMPLETE**
+- Working fine on IFC file import
+
+**Need to Fix**
+- If I select the window on the object view, need to high light window on the 3D model part

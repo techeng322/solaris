@@ -871,31 +871,65 @@ if PYQT6_AVAILABLE:
             # Switch to 3D viewer tab to show the highlight
             self.switch_to_3d_viewer()
             
-            # If a window is selected, highlight it (Trimesh viewer will open automatically if needed)
-            if isinstance(selected_object, Window):
-                logger.info(f"Window selected: {selected_object.id} - highlighting")
-                # Highlight the selected window (this will open Trimesh viewer automatically if not open)
-                self.glb_viewer_widget.highlight_window(selected_object)
-                logger.info(f"Highlight request sent for window: {selected_object.id}")
-            elif isinstance(selected_object, Building):
-                logger.info(f"Building selected: {selected_object.id} - clearing highlight")
-                # Clear highlight for building selection
-                self.glb_viewer_widget.highlight_window(None)
-            else:
-                # For any other object, try to highlight if it has the required attributes
-                logger.info(f"Object selected: {type(selected_object).__name__} - attempting highlight")
-                # Check if object has required attributes for highlighting (id, center, normal, size)
-                if (hasattr(selected_object, 'id') and 
-                    hasattr(selected_object, 'center') and 
-                    hasattr(selected_object, 'normal') and 
-                    hasattr(selected_object, 'size')):
-                    # Try to highlight (this will open Trimesh viewer automatically if not open)
+            # Check if this is an IFC element (space, door, etc.)
+            is_ifc_space = False
+            is_ifc_door = False
+            if hasattr(selected_object, 'is_a') and callable(selected_object.is_a):
+                is_ifc_space = selected_object.is_a("IfcSpace")
+                is_ifc_door = selected_object.is_a("IfcDoor")
+            elif hasattr(selected_object, '__class__'):
+                class_str = str(selected_object.__class__)
+                is_ifc_space = 'IfcSpace' in class_str
+                is_ifc_door = 'IfcDoor' in class_str
+            
+            # Give Qt a moment to make the tab visible before highlighting
+            # Use QTimer to delay highlight slightly so widget is fully visible
+            from PyQt6.QtCore import QTimer
+            def delayed_highlight():
+                # Priority 1: If it's an IFC space, highlight it in red
+                if is_ifc_space:
+                    space_id = getattr(selected_object, 'GlobalId', None) or getattr(selected_object, 'id', None)
+                    if space_id:
+                        logger.info(f"Space selected: {space_id} - highlighting in red")
+                        # Highlight the selected space (will be shown in red)
+                        self.glb_viewer_widget.highlight_window(selected_object)
+                        logger.info(f"Highlight request sent for space: {space_id}")
+                    else:
+                        logger.warning(f"Space element has no identifiable ID")
+                # Priority 2: If it's an IFC door, highlight it in green
+                elif is_ifc_door:
+                    door_id = getattr(selected_object, 'GlobalId', None) or getattr(selected_object, 'id', None)
+                    if door_id:
+                        logger.info(f"Door selected: {door_id} - highlighting in green")
+                        # Highlight the selected door (will be shown in green)
+                        self.glb_viewer_widget.highlight_window(selected_object)
+                        logger.info(f"Highlight request sent for door: {door_id}")
+                    else:
+                        logger.warning(f"Door element has no identifiable ID")
+                # Priority 3: If a window is selected, highlight it in blue
+                elif isinstance(selected_object, Window):
+                    logger.info(f"Window selected: {selected_object.id} - highlighting in blue")
+                    # Highlight the selected window (will be shown in blue)
                     self.glb_viewer_widget.highlight_window(selected_object)
-                    logger.info(f"Highlight request sent for object: {getattr(selected_object, 'id', 'unknown')}")
-                else:
-                    logger.debug(f"Object {type(selected_object).__name__} does not have required attributes for highlighting")
-                    # Clear highlight if object can't be highlighted
+                    logger.info(f"Highlight request sent for window: {selected_object.id}")
+                elif isinstance(selected_object, Building):
+                    logger.info(f"Building selected: {selected_object.id} - clearing highlight")
                     self.glb_viewer_widget.highlight_window(None)
+                else:
+                    # For any other object, try to highlight if it has the required attributes
+                    logger.info(f"Object selected: {type(selected_object).__name__} - attempting highlight")
+                    if (hasattr(selected_object, 'id') and 
+                        hasattr(selected_object, 'center') and 
+                        hasattr(selected_object, 'normal') and 
+                        hasattr(selected_object, 'size')):
+                        self.glb_viewer_widget.highlight_window(selected_object)
+                        logger.info(f"Highlight request sent for object: {getattr(selected_object, 'id', 'unknown')}")
+                    else:
+                        logger.debug(f"Object {type(selected_object).__name__} does not have required attributes for highlighting")
+                        self.glb_viewer_widget.highlight_window(None)
+            
+            # Delay highlight by 100ms to ensure tab is visible
+            QTimer.singleShot(100, delayed_highlight)
         
         def update_results_table(self, result):
             """Update results table with calculation results (windows only)."""
