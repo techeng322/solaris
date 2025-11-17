@@ -6,8 +6,17 @@ using semantic data and relationships, avoiding heavy geometry processing.
 
 from typing import List, Dict, Optional, Tuple
 import logging
-import ifcopenshell
-from ifcopenshell import geom
+
+# Try to import ifcopenshell (required for IFC file import)
+try:
+    import ifcopenshell
+    from ifcopenshell import geom
+    IFC_AVAILABLE = True
+except ImportError:
+    IFC_AVAILABLE = False
+    ifcopenshell = None
+    geom = None
+
 import numpy as np
 
 from .base_importer import BaseImporter
@@ -21,6 +30,9 @@ except ImportError:
     TRIMESH_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
+
+if not IFC_AVAILABLE:
+    logger.warning("ifcopenshell not available - IFC file import disabled. Install with: pip install ifcopenshell (requires Python 3.8-3.12)")
 
 
 class IFCImporter(BaseImporter):
@@ -52,6 +64,19 @@ class IFCImporter(BaseImporter):
         Returns:
             List of Building objects
         """
+        if not IFC_AVAILABLE:
+            error_msg = (
+                "ifcopenshell is not available. IFC file import requires ifcopenshell, "
+                "which only supports Python 3.8-3.12.\n\n"
+                "To use IFC files:\n"
+                "1. Install Python 3.12 from: https://www.python.org/downloads/release/python-31211/\n"
+                "2. Run: .\\setup_python312_env.ps1\n"
+                "3. Or manually: py -3.12 -m venv venv312 && pip install ifcopenshell\n\n"
+                "Note: GLB files work fine with Python 3.14."
+            )
+            logger.error(error_msg)
+            raise ImportError(error_msg)
+        
         try:
             logger.info(f"Opening IFC file: {self.file_path}")
             try:
