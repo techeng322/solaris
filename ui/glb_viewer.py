@@ -116,6 +116,7 @@ if PYQT6_AVAILABLE:
             self.center = QVector3D(0, 0, 0)  # Model center point
             self.scale_factor = 1.0
             self.base_distance = 5.0  # Base distance for auto-fit
+            self.vertex_colors = None  # Store vertex colors for rendering
             # Window highlighting
             self.building = None  # Store building for window access
             self.highlighted_window = None  # Currently highlighted window/space/door
@@ -151,6 +152,49 @@ if PYQT6_AVAILABLE:
                     center = (min_bounds + max_bounds) / 2
                     self.center = QVector3D(center[0], center[1], center[2])
                     logger.info(f"✓ Calculated mesh center: ({self.center.x():.2f}, {self.center.y():.2f}, {self.center.z():.2f})")
+                    
+                    # Extract colors from mesh
+                    self.vertex_colors = None
+                    try:
+                        # Check for face colors first (most common in trimesh)
+                        if hasattr(mesh, 'visual') and hasattr(mesh.visual, 'face_colors'):
+                            face_colors = mesh.visual.face_colors
+                            if face_colors is not None and len(face_colors) > 0:
+                                # Expand face colors to vertex colors (each vertex gets the color of its face)
+                                faces = mesh.faces
+                                vertex_colors_list = []
+                                for face_idx, face in enumerate(faces):
+                                    if face_idx < len(face_colors):
+                                        # Get color for this face (normalize to 0-1 range)
+                                        face_color = face_colors[face_idx]
+                                        if len(face_color) >= 3:
+                                            # Convert to float 0-1 range
+                                            if face_color.dtype == np.uint8:
+                                                color = face_color[:3].astype(np.float32) / 255.0
+                                            else:
+                                                color = face_color[:3].astype(np.float32)
+                                            # Assign same color to all 3 vertices of the face
+                                            for _ in range(3):
+                                                vertex_colors_list.append(color)
+                                
+                                if len(vertex_colors_list) > 0:
+                                    self.vertex_colors = np.array(vertex_colors_list, dtype=np.float32)
+                                    logger.info(f"✓ Extracted {len(self.vertex_colors)} vertex colors from mesh face colors")
+                        # Check for vertex colors as fallback
+                        elif hasattr(mesh, 'visual') and hasattr(mesh.visual, 'vertex_colors'):
+                            vertex_colors = mesh.visual.vertex_colors
+                            if vertex_colors is not None and len(vertex_colors) > 0:
+                                # Normalize to 0-1 range
+                                if vertex_colors.dtype == np.uint8:
+                                    self.vertex_colors = vertex_colors[:, :3].astype(np.float32) / 255.0
+                                else:
+                                    self.vertex_colors = vertex_colors[:, :3].astype(np.float32)
+                                logger.info(f"✓ Extracted {len(self.vertex_colors)} vertex colors from mesh")
+                    except Exception as e:
+                        logger.debug(f"Could not extract colors from mesh: {e}, will use default color")
+                    
+                    if self.vertex_colors is None:
+                        logger.info("Mesh has no colors - will use default shader color")
                     
                     # Calculate scale to fit in view and set appropriate camera distance
                     size = np.max(max_bounds - min_bounds)
@@ -703,10 +747,13 @@ if PYQT6_AVAILABLE:
                     attribute vec3 position;
                     uniform mat4 mvpMatrix;
                     varying float depth;
+                    varying vec4 color;
                     void main() {
                         gl_Position = mvpMatrix * vec4(position, 1.0);
                         // Pass depth for simple shading
                         depth = gl_Position.z / gl_Position.w;
+                        // Pass color through (gl_Color is set via GL.glColor3f in immediate mode)
+                        color = gl_Color;
                     }
                 """):
                     logger.error(f"Failed to compile vertex shader: {vertex_shader.log()}")
@@ -715,9 +762,11 @@ if PYQT6_AVAILABLE:
                 fragment_shader = QOpenGLShader(QOpenGLShader.ShaderTypeBit.Fragment)
                 if not fragment_shader.compileSourceCode("""
                     varying float depth;
+                    varying vec4 color;
                     void main() {
-                        // Professional light gray-blue base color (brighter and more visible)
-                        vec3 baseColor = vec3(0.85, 0.88, 0.92);
+                        // Use vertex color (passed from vertex shader via gl_Color)
+                        // The color is set via GL.glColor3f() in the code before each vertex
+                        vec3 baseColor = color.rgb;
                         
                         // Simple depth-based shading for better 3D perception
                         float depthFactor = 0.7 + 0.3 * smoothstep(-1.0, 1.0, depth);
@@ -913,13 +962,36 @@ if PYQT6_AVAILABLE:
                     GL.glEnable(GL.GL_DEPTH_TEST)
                     GL.glDepthFunc(GL.GL_LESS)
                     
+                    # Set default color first (light gray-blue)
+                    GL.glColor3f(0.85, 0.88, 0.92)
+                    
+                    # Enable color material if we have vertex colors
+                    has_colors = self.vertex_colors is not None and len(self.vertex_colors) > 0
+                    if has_colors:
+                        GL.glEnable(GL.GL_COLOR_MATERIAL)
+                        GL.glColorMaterial(GL.GL_FRONT_AND_BACK, GL.GL_AMBIENT_AND_DIFFUSE)
+                    
                     GL.glBegin(GL.GL_TRIANGLES)
+                    vertex_color_idx = 0
                     for face in faces:
                         for vertex_idx in face:
                             if vertex_idx < len(vertices):
                                 v = vertices[vertex_idx]
+                                # Set color if available
+                                if has_colors and vertex_color_idx < len(self.vertex_colors):
+                                    color = self.vertex_colors[vertex_color_idx]
+                                    # Ensure color values are in valid range
+                                    r = max(0.0, min(1.0, float(color[0])))
+                                    g = max(0.0, min(1.0, float(color[1])))
+                                    b = max(0.0, min(1.0, float(color[2])))
+                                    GL.glColor3f(r, g, b)
+                                    vertex_color_idx += 1
+                                # If no colors, the default color set above will be used
                                 GL.glVertex3f(float(v[0]), float(v[1]), float(v[2]))
                     GL.glEnd()
+                    
+                    if has_colors:
+                        GL.glDisable(GL.GL_COLOR_MATERIAL)
                     
                     self.shader_program.release()
                 
