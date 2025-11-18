@@ -256,7 +256,8 @@ class ObjectTreeViewerWidget(QWidget):
                     area = window.get_area()
                     window_details.append(f"Area: {area:.2f} m²")
                     window_details.append(f"Size: {window.size[0]:.2f}×{window.size[1]:.2f} m")
-                if window.window_type:
+                if window.window_type and window.window_type.lower() != 'unknown':
+                    # Show window type only if it's not 'unknown'
                     window_details.append(f"Type: {window.window_type}")
                 
                 window_item.setText(1, ", ".join(window_details) if window_details else "")

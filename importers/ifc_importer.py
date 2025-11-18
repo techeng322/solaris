@@ -1248,6 +1248,132 @@ class IFCImporter(BaseImporter):
         
         return material_props
     
+    def _extract_color_from_element(self, element) -> Optional[np.ndarray]:
+        """
+        Extract color from IFC element by following the material -> style -> color chain.
+        IFC colors are stored in IfcSurfaceStyle -> IfcSurfaceStyleRendering -> SurfaceColour.
+        
+        Returns:
+            RGB color array [0-1] or None if no color found
+        """
+        try:
+            # Method 1: Get color from IfcStyledItem (most direct)
+            # Elements can have styled items directly
+            if hasattr(element, 'StyledByItem'):
+                for styled_item_rel in element.StyledByItem:
+                    if hasattr(styled_item_rel, 'Styles'):
+                        for style in styled_item_rel.Styles:
+                            color = self._extract_color_from_style(style)
+                            if color is not None:
+                                return color
+            
+            # Method 2: Get color from material -> style chain
+            if hasattr(element, 'HasAssociations'):
+                for assoc in element.HasAssociations:
+                    if assoc.is_a("IfcRelAssociatesMaterial"):
+                        material_select = assoc.RelatingMaterial
+                        
+                        # Get styled items from material
+                        if hasattr(material_select, 'StyledByItem'):
+                            for styled_item_rel in material_select.StyledByItem:
+                                if hasattr(styled_item_rel, 'Styles'):
+                                    for style in styled_item_rel.Styles:
+                                        color = self._extract_color_from_style(style)
+                                        if color is not None:
+                                            return color
+                        
+                        # Also check material layers
+                        if material_select.is_a("IfcMaterialLayerSet"):
+                            for layer in material_select.MaterialLayers:
+                                if hasattr(layer, 'Material') and layer.Material:
+                                    if hasattr(layer.Material, 'StyledByItem'):
+                                        for styled_item_rel in layer.Material.StyledByItem:
+                                            if hasattr(styled_item_rel, 'Styles'):
+                                                for style in styled_item_rel.Styles:
+                                                    color = self._extract_color_from_style(style)
+                                                    if color is not None:
+                                                        return color
+            
+            # Method 3: Try to get default color based on element type
+            # This is a fallback - some IFC files don't have explicit colors
+            return None
+            
+        except Exception as e:
+            logger.debug(f"Error extracting color from element {element.id()}: {e}")
+            return None
+    
+    def _extract_color_from_style(self, style) -> Optional[np.ndarray]:
+        """
+        Extract RGB color from IFC style object.
+        
+        Args:
+            style: IFC style object (IfcSurfaceStyle, IfcPresentationStyleAssignment, etc.)
+            
+        Returns:
+            RGB color array [0-1] or None if no color found
+        """
+        try:
+            # IfcSurfaceStyle -> IfcSurfaceStyleRendering -> SurfaceColour
+            if style.is_a("IfcSurfaceStyle"):
+                if hasattr(style, 'Styles'):
+                    for sub_style in style.Styles:
+                        if sub_style.is_a("IfcSurfaceStyleRendering"):
+                            if hasattr(sub_style, 'SurfaceColour'):
+                                surface_colour = sub_style.SurfaceColour
+                                if surface_colour:
+                                    # SurfaceColour has Red, Green, Blue attributes (0-1)
+                                    r = float(surface_colour.Red) if hasattr(surface_colour, 'Red') else 0.8
+                                    g = float(surface_colour.Green) if hasattr(surface_colour, 'Green') else 0.8
+                                    b = float(surface_colour.Blue) if hasattr(surface_colour, 'Blue') else 0.8
+                                    return np.array([r, g, b], dtype=np.float32)
+            
+            # IfcPresentationStyleAssignment -> IfcSurfaceStyle
+            elif style.is_a("IfcPresentationStyleAssignment"):
+                if hasattr(style, 'Styles'):
+                    for sub_style in style.Styles:
+                        color = self._extract_color_from_style(sub_style)
+                        if color is not None:
+                            return color
+            
+            # IfcStyledItem -> IfcPresentationStyleAssignment
+            elif style.is_a("IfcStyledItem"):
+                if hasattr(style, 'Styles'):
+                    for sub_style in style.Styles:
+                        color = self._extract_color_from_style(sub_style)
+                        if color is not None:
+                            return color
+            
+        except Exception as e:
+            logger.debug(f"Error extracting color from style: {e}")
+        
+        return None
+    
+    def _get_default_color_for_element_type(self, element) -> Optional[np.ndarray]:
+        """
+        Get default color based on IFC element type.
+        Provides fallback colors when IFC file doesn't have explicit colors.
+        
+        Returns:
+            RGB color array [0-1] or None
+        """
+        element_type = element.is_a()
+        
+        # Default colors for common IFC element types
+        default_colors = {
+            'IfcWall': np.array([0.8, 0.7, 0.6], dtype=np.float32),  # Beige/tan for walls
+            'IfcWallStandardCase': np.array([0.8, 0.7, 0.6], dtype=np.float32),
+            'IfcSlab': np.array([0.7, 0.7, 0.7], dtype=np.float32),  # Gray for floors
+            'IfcRoof': np.array([0.9, 0.8, 0.5], dtype=np.float32),  # Yellow/tan for roof
+            'IfcSpace': np.array([0.9, 0.9, 0.95], dtype=np.float32),  # Light blue-gray for spaces
+            'IfcColumn': np.array([0.6, 0.6, 0.6], dtype=np.float32),  # Gray for columns
+            'IfcBeam': np.array([0.5, 0.5, 0.5], dtype=np.float32),  # Dark gray for beams
+            'IfcDoor': np.array([0.6, 0.4, 0.2], dtype=np.float32),  # Brown for doors
+            'IfcWindow': np.array([0.7, 0.8, 0.9], dtype=np.float32),  # Light blue for windows
+            'IfcOpeningElement': np.array([0.5, 0.5, 0.5], dtype=np.float32),  # Gray for openings
+        }
+        
+        return default_colors.get(element_type, None)
+    
     def _generate_mesh_for_viewer(self):
         """
         Generate 3D mesh from IFC geometry for viewer display.
@@ -1283,6 +1409,19 @@ class IFCImporter(BaseImporter):
             try:
                 if hasattr(settings, 'USE_WORLD_COORDS'):
                     settings.set(settings.USE_WORLD_COORDS, True)
+            except:
+                pass
+            
+            # Enable color/material extraction if available
+            try:
+                # Try to enable styles/colors extraction
+                if hasattr(settings, 'USE_BREP_DATA'):
+                    settings.set(settings.USE_BREP_DATA, False)  # Disable BREP for faster processing
+            except:
+                pass
+            try:
+                if hasattr(settings, 'SEW_SHELLS'):
+                    settings.set(settings.SEW_SHELLS, True)  # Sew shells for better geometry
             except:
                 pass
             
@@ -1426,6 +1565,77 @@ class IFCImporter(BaseImporter):
                                         mesh = trimesh.Trimesh(vertices=vertices, faces=faces)
                                         # Validate the created mesh
                                         if len(mesh.vertices) > 0 and len(mesh.faces) > 0:
+                                            # Extract and apply color from IFC element
+                                            # Try multiple methods to get color
+                                            color = None
+                                            
+                                            # Method 1: Try to get color from shape (ifcopenshell may have extracted it)
+                                            try:
+                                                # Try different ways to access shape colors
+                                                if hasattr(shape, 'styles') and shape.styles:
+                                                    styles = shape.styles
+                                                    if styles and len(styles) > 0:
+                                                        # Get first style color
+                                                        style = styles[0]
+                                                        # Try different attribute names for color
+                                                        if hasattr(style, 'Diffuse') and style.Diffuse:
+                                                            diffuse = style.Diffuse
+                                                            if len(diffuse) >= 3:
+                                                                color = np.array([diffuse[0], diffuse[1], diffuse[2]], dtype=np.float32)
+                                                                logger.info(f"✓ Extracted color from shape.styles.Diffuse: {color}")
+                                                        elif hasattr(style, 'diffuse') and style.diffuse:
+                                                            diffuse = style.diffuse
+                                                            if len(diffuse) >= 3:
+                                                                color = np.array([diffuse[0], diffuse[1], diffuse[2]], dtype=np.float32)
+                                                                logger.info(f"✓ Extracted color from shape.styles.diffuse: {color}")
+                                                        elif hasattr(style, 'colour') and style.colour:
+                                                            col = style.colour
+                                                            if len(col) >= 3:
+                                                                color = np.array([col[0], col[1], col[2]], dtype=np.float32)
+                                                                logger.info(f"✓ Extracted color from shape.styles.colour: {color}")
+                                            except Exception as e:
+                                                logger.debug(f"Could not extract color from shape.styles: {e}")
+                                            
+                                            # Method 1b: Try to get color from shape material
+                                            if color is None:
+                                                try:
+                                                    if hasattr(shape, 'material') and shape.material:
+                                                        mat = shape.material
+                                                        if hasattr(mat, 'Diffuse') and mat.Diffuse:
+                                                            diffuse = mat.Diffuse
+                                                            if len(diffuse) >= 3:
+                                                                color = np.array([diffuse[0], diffuse[1], diffuse[2]], dtype=np.float32)
+                                                                logger.info(f"✓ Extracted color from shape.material: {color}")
+                                                except Exception as e:
+                                                    logger.debug(f"Could not extract color from shape.material: {e}")
+                                            
+                                            # Method 2: Extract from IFC element material/style chain
+                                            if color is None:
+                                                color = self._extract_color_from_element(element)
+                                                if color is not None:
+                                                    logger.debug(f"Extracted color from element material/style: {color}")
+                                            
+                                            # Method 3: Use element-type-based default colors
+                                            if color is None:
+                                                color = self._get_default_color_for_element_type(element)
+                                                if color is not None:
+                                                    logger.debug(f"Using default color for {element_type}: {color}")
+                                            
+                                            # Apply color to mesh faces
+                                            if color is not None:
+                                                face_count = len(mesh.faces)
+                                                color_uint8 = (np.array(color) * 255).astype(np.uint8)
+                                                face_colors = np.tile(
+                                                    np.append(color_uint8, 255),
+                                                    (face_count, 1)
+                                                )
+                                                if not hasattr(mesh, 'visual'):
+                                                    mesh.visual = trimesh.visual.ColorVisuals()
+                                                mesh.visual.face_colors = face_colors
+                                                logger.info(f"✓ Applied color {color} to {element_type} mesh ({face_count} faces)")
+                                            else:
+                                                logger.debug(f"No color found for {element_type} {element.id()}")
+                                            
                                             meshes.append(mesh)
                                             successful_elements += 1
                                         else:
@@ -1464,6 +1674,10 @@ class IFCImporter(BaseImporter):
                 try:
                     combined_mesh = trimesh.util.concatenate(meshes)
                     logger.info(f"Successfully combined {len(meshes)} meshes")
+                    # Check if colors were preserved
+                    if hasattr(combined_mesh, 'visual') and hasattr(combined_mesh.visual, 'face_colors'):
+                        if combined_mesh.visual.face_colors is not None and len(combined_mesh.visual.face_colors) > 0:
+                            logger.info(f"✓ Colors preserved in combined mesh: {len(combined_mesh.visual.face_colors)} face colors")
                 except Exception as e:
                     logger.error(f"Failed to combine meshes: {e}")
                     # Try to use the first mesh as fallback

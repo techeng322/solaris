@@ -787,6 +787,12 @@ if PYQT6_AVAILABLE:
             # Update 3D viewer with building data for window highlighting
             if self.glb_viewer_widget:
                 self.glb_viewer_widget.set_building(building)
+                # Also set IFC file reference if available (for extracting actual geometry)
+                if hasattr(self.import_worker, 'importer') and self.import_worker.importer:
+                    importer = self.import_worker.importer
+                    if hasattr(importer, 'ifc_file') and importer.ifc_file is not None:
+                        self.glb_viewer_widget.set_ifc_file(importer.ifc_file)
+                        self.log("IFC file reference set in 3D viewer - can extract actual window geometry")
             
             # Update results table
             self.update_results_table(result)
@@ -871,16 +877,47 @@ if PYQT6_AVAILABLE:
             # Switch to 3D viewer tab to show the highlight
             self.switch_to_3d_viewer()
             
-            # Check if this is an IFC element (space, door, etc.)
+            # Check if this is an IFC element (space, door, window, wall, slab, storey, opening, etc.)
             is_ifc_space = False
             is_ifc_door = False
+            is_ifc_window = False
+            is_ifc_wall = False
+            is_ifc_slab = False
+            is_ifc_storey = False
+            is_ifc_opening = False
+            
+            logger.info(f"=== OBJECT DETECTION DIAGNOSTIC ===")
+            logger.info(f"Object type: {type(selected_object).__name__}")
+            logger.info(f"Object class: {selected_object.__class__}")
+            logger.info(f"Has is_a method: {hasattr(selected_object, 'is_a') and callable(selected_object.is_a)}")
+            
             if hasattr(selected_object, 'is_a') and callable(selected_object.is_a):
-                is_ifc_space = selected_object.is_a("IfcSpace")
-                is_ifc_door = selected_object.is_a("IfcDoor")
+                try:
+                    is_ifc_space = selected_object.is_a("IfcSpace")
+                    is_ifc_door = selected_object.is_a("IfcDoor")
+                    is_ifc_window = selected_object.is_a("IfcWindow")
+                    is_ifc_wall = selected_object.is_a("IfcWall") or selected_object.is_a("IfcWallStandardCase")
+                    is_ifc_slab = selected_object.is_a("IfcSlab")
+                    is_ifc_storey = selected_object.is_a("IfcBuildingStorey")
+                    is_ifc_opening = selected_object.is_a("IfcOpeningElement")
+                    logger.info(f"Using is_a() method: space={is_ifc_space}, door={is_ifc_door}, window={is_ifc_window}, wall={is_ifc_wall}, slab={is_ifc_slab}, storey={is_ifc_storey}, opening={is_ifc_opening}")
+                except Exception as e:
+                    logger.warning(f"Error calling is_a() method: {e}")
             elif hasattr(selected_object, '__class__'):
                 class_str = str(selected_object.__class__)
                 is_ifc_space = 'IfcSpace' in class_str
                 is_ifc_door = 'IfcDoor' in class_str
+                is_ifc_window = 'IfcWindow' in class_str
+                is_ifc_wall = 'IfcWall' in class_str
+                is_ifc_slab = 'IfcSlab' in class_str
+                is_ifc_storey = 'IfcBuildingStorey' in class_str
+                is_ifc_opening = 'IfcOpeningElement' in class_str
+                logger.info(f"Using class string check: class_str={class_str}")
+                logger.info(f"  space={is_ifc_space}, door={is_ifc_door}, window={is_ifc_window}, wall={is_ifc_wall}, slab={is_ifc_slab}, storey={is_ifc_storey}, opening={is_ifc_opening}")
+            else:
+                logger.warning(f"Object has no is_a() method and no __class__ attribute - cannot detect IFC type")
+            
+            logger.info(f"Final detection result: space={is_ifc_space}, door={is_ifc_door}, window={is_ifc_window}, wall={is_ifc_wall}, slab={is_ifc_slab}, storey={is_ifc_storey}, opening={is_ifc_opening}")
             
             # Give Qt a moment to make the tab visible before highlighting
             # Use QTimer to delay highlight slightly so widget is fully visible
@@ -890,42 +927,88 @@ if PYQT6_AVAILABLE:
                 if is_ifc_space:
                     space_id = getattr(selected_object, 'GlobalId', None) or getattr(selected_object, 'id', None)
                     if space_id:
-                        logger.info(f"Space selected: {space_id} - highlighting in red")
-                        # Highlight the selected space (will be shown in red)
+                        logger.info(f"✓ Space selected: {space_id} - highlighting in red")
                         self.glb_viewer_widget.highlight_window(selected_object)
-                        logger.info(f"Highlight request sent for space: {space_id}")
+                        logger.info(f"✓ Highlight request sent for space: {space_id}")
                     else:
-                        logger.warning(f"Space element has no identifiable ID")
+                        logger.warning(f"⚠ Space element has no identifiable ID")
                 # Priority 2: If it's an IFC door, highlight it in green
                 elif is_ifc_door:
                     door_id = getattr(selected_object, 'GlobalId', None) or getattr(selected_object, 'id', None)
                     if door_id:
-                        logger.info(f"Door selected: {door_id} - highlighting in green")
-                        # Highlight the selected door (will be shown in green)
+                        logger.info(f"✓ Door selected: {door_id} - highlighting in green")
                         self.glb_viewer_widget.highlight_window(selected_object)
-                        logger.info(f"Highlight request sent for door: {door_id}")
+                        logger.info(f"✓ Highlight request sent for door: {door_id}")
                     else:
-                        logger.warning(f"Door element has no identifiable ID")
-                # Priority 3: If a window is selected, highlight it in blue
+                        logger.warning(f"⚠ Door element has no identifiable ID")
+                # Priority 3: If it's an IFC window, highlight it in cyan
+                elif is_ifc_window:
+                    window_id = getattr(selected_object, 'GlobalId', None) or getattr(selected_object, 'id', None)
+                    if window_id:
+                        logger.info(f"✓ IFC Window selected: {window_id} - highlighting in cyan")
+                        self.glb_viewer_widget.highlight_window(selected_object)
+                        logger.info(f"✓ Highlight request sent for IFC window: {window_id}")
+                    else:
+                        logger.warning(f"⚠ IFC Window element has no identifiable ID")
+                # Priority 4: If it's an IFC wall, highlight it in yellow
+                elif is_ifc_wall:
+                    wall_id = getattr(selected_object, 'GlobalId', None) or getattr(selected_object, 'id', None)
+                    if wall_id:
+                        logger.info(f"✓ Wall selected: {wall_id} - highlighting in yellow")
+                        self.glb_viewer_widget.highlight_window(selected_object)
+                        logger.info(f"✓ Highlight request sent for wall: {wall_id}")
+                    else:
+                        logger.warning(f"⚠ Wall element has no identifiable ID")
+                # Priority 5: If it's an IFC slab, highlight it in magenta
+                elif is_ifc_slab:
+                    slab_id = getattr(selected_object, 'GlobalId', None) or getattr(selected_object, 'id', None)
+                    if slab_id:
+                        logger.info(f"✓ Slab selected: {slab_id} - highlighting in magenta")
+                        self.glb_viewer_widget.highlight_window(selected_object)
+                        logger.info(f"✓ Highlight request sent for slab: {slab_id}")
+                    else:
+                        logger.warning(f"⚠ Slab element has no identifiable ID")
+                # Priority 6: If it's an IFC opening, highlight it in purple
+                elif is_ifc_opening:
+                    opening_id = getattr(selected_object, 'GlobalId', None) or getattr(selected_object, 'id', None)
+                    if opening_id:
+                        logger.info(f"✓ Opening selected: {opening_id} - highlighting in purple")
+                        self.glb_viewer_widget.highlight_window(selected_object)
+                        logger.info(f"✓ Highlight request sent for opening: {opening_id}")
+                    else:
+                        logger.warning(f"⚠ Opening element has no identifiable ID")
+                # Priority 7: If it's an IFC storey, highlight it in orange
+                elif is_ifc_storey:
+                    storey_id = getattr(selected_object, 'GlobalId', None) or getattr(selected_object, 'id', None)
+                    if storey_id:
+                        logger.info(f"✓ Storey selected: {storey_id} - highlighting in orange")
+                        logger.warning(f"⚠ Note: IfcBuildingStorey typically has no direct geometry - it contains spaces and elements")
+                        logger.warning(f"   Attempting to highlight anyway (may fail if no geometry exists)")
+                        self.glb_viewer_widget.highlight_window(selected_object)
+                        logger.info(f"✓ Highlight request sent for storey: {storey_id}")
+                    else:
+                        logger.warning(f"⚠ Storey element has no identifiable ID")
+                # Priority 8: If a Window object (from models.building) is selected, highlight it in blue
                 elif isinstance(selected_object, Window):
-                    logger.info(f"Window selected: {selected_object.id} - highlighting in blue")
-                    # Highlight the selected window (will be shown in blue)
+                    logger.info(f"✓ Window object selected: {selected_object.id} - highlighting in blue")
                     self.glb_viewer_widget.highlight_window(selected_object)
-                    logger.info(f"Highlight request sent for window: {selected_object.id}")
+                    logger.info(f"✓ Highlight request sent for window: {selected_object.id}")
                 elif isinstance(selected_object, Building):
                     logger.info(f"Building selected: {selected_object.id} - clearing highlight")
                     self.glb_viewer_widget.highlight_window(None)
                 else:
                     # For any other object, try to highlight if it has the required attributes
                     logger.info(f"Object selected: {type(selected_object).__name__} - attempting highlight")
+                    logger.info(f"  Object attributes: {[attr for attr in dir(selected_object) if not attr.startswith('_')][:20]}")
                     if (hasattr(selected_object, 'id') and 
                         hasattr(selected_object, 'center') and 
                         hasattr(selected_object, 'normal') and 
                         hasattr(selected_object, 'size')):
                         self.glb_viewer_widget.highlight_window(selected_object)
-                        logger.info(f"Highlight request sent for object: {getattr(selected_object, 'id', 'unknown')}")
+                        logger.info(f"✓ Highlight request sent for object: {getattr(selected_object, 'id', 'unknown')}")
                     else:
-                        logger.debug(f"Object {type(selected_object).__name__} does not have required attributes for highlighting")
+                        logger.warning(f"⚠ Object {type(selected_object).__name__} does not have required attributes for highlighting")
+                        logger.warning(f"  Has id: {hasattr(selected_object, 'id')}, center: {hasattr(selected_object, 'center')}, normal: {hasattr(selected_object, 'normal')}, size: {hasattr(selected_object, 'size')}")
                         self.glb_viewer_widget.highlight_window(None)
             
             # Delay highlight by 100ms to ensure tab is visible

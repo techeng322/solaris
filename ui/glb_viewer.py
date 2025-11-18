@@ -119,10 +119,17 @@ if PYQT6_AVAILABLE:
             self.vertex_colors = None  # Store vertex colors for rendering
             # Window highlighting
             self.building = None  # Store building for window access
+            self.ifc_file = None  # Store IFC file reference for extracting actual geometry
             self.highlighted_window = None  # Currently highlighted window/space/door
             self.window_meshes = {}  # Cache of window/space/door geometry meshes
+            self.window_coordinate_transform = None  # Cached transformation offset for window coordinates
             self.highlight_is_space = False  # Track if current highlight is a space (for red color)
             self.highlight_is_door = False  # Track if current highlight is a door (for green color)
+            self.highlight_is_window = False  # Track if current highlight is an IFC window (for cyan color)
+            self.highlight_is_wall = False  # Track if current highlight is a wall (for yellow color)
+            self.highlight_is_slab = False  # Track if current highlight is a slab (for magenta color)
+            self.highlight_is_storey = False  # Track if current highlight is a storey (for orange color)
+            self.highlight_is_opening = False  # Track if current highlight is an opening (for purple color)
             # Auto-rotation
             self.auto_rotate = False  # Auto-rotation enabled/disabled
             self.rotation_speed = 0.5  # Degrees per frame (adjustable)
@@ -142,6 +149,7 @@ if PYQT6_AVAILABLE:
             logger.info(f"Mesh provided: {mesh is not None}")
             
             self.mesh = mesh
+            self.window_coordinate_transform = None  # Clear transformation cache when mesh changes
             if mesh is not None:
                 # Calculate center and scale
                 vertices = mesh.vertices
@@ -233,10 +241,26 @@ if PYQT6_AVAILABLE:
             """Set building data for window highlighting."""
             self.building = building
             self.window_meshes = {}  # Clear cache when building changes
+            self.window_coordinate_transform = None  # Clear transformation cache when building changes
             self.highlighted_window = None
             self.highlight_is_space = False
             self.highlight_is_door = False
             self.update()
+        
+        def set_ifc_file(self, ifc_file):
+            """Set IFC file reference for extracting actual geometry from IFC elements."""
+            import logging
+            logger = logging.getLogger(__name__)
+            self.ifc_file = ifc_file
+            if ifc_file:
+                try:
+                    window_count = len(ifc_file.by_type('IfcWindow'))
+                    logger.info(f"IFC file set: {getattr(ifc_file, 'schema', 'Unknown schema')}")
+                    logger.info(f"  IFC file has {window_count} windows")
+                except:
+                    logger.info(f"IFC file set (could not count windows)")
+            else:
+                logger.info("IFC file cleared")
         
         def highlight_window(self, window):
             """Highlight a specific window, space, door, or object with colored surface (blue for windows, red for spaces, green for doors)."""
@@ -247,6 +271,11 @@ if PYQT6_AVAILABLE:
                 self.highlighted_window = None
                 self.highlight_is_space = False
                 self.highlight_is_door = False
+                self.highlight_is_window = False
+                self.highlight_is_wall = False
+                self.highlight_is_slab = False
+                self.highlight_is_storey = False
+                self.highlight_is_opening = False
                 logger.info("Object highlight cleared")
                 # Ensure widget is visible and update
                 if self.isVisible():
@@ -268,25 +297,43 @@ if PYQT6_AVAILABLE:
             except ImportError:
                 logger.debug("Could not import Window class for type checking")
             
-            # Check if this is an IFC element (space, door, etc.)
+            # Check if this is an IFC element (space, door, window, wall, slab, storey, opening, etc.)
             is_ifc_space = False
             is_ifc_door = False
+            is_ifc_window = False
+            is_ifc_wall = False
+            is_ifc_slab = False
+            is_ifc_storey = False
+            is_ifc_opening = False
+            
+            logger.info(f"=== IFC ELEMENT DETECTION IN highlight_window ===")
             if hasattr(window, 'is_a') and callable(window.is_a):
                 try:
                     is_ifc_space = window.is_a("IfcSpace")
                     is_ifc_door = window.is_a("IfcDoor")
-                    logger.info(f"Using is_a() method: is_ifc_space={is_ifc_space}, is_ifc_door={is_ifc_door}")
+                    is_ifc_window = window.is_a("IfcWindow")
+                    is_ifc_wall = window.is_a("IfcWall") or window.is_a("IfcWallStandardCase")
+                    is_ifc_slab = window.is_a("IfcSlab")
+                    is_ifc_storey = window.is_a("IfcBuildingStorey")
+                    is_ifc_opening = window.is_a("IfcOpeningElement")
+                    logger.info(f"Using is_a() method: space={is_ifc_space}, door={is_ifc_door}, window={is_ifc_window}, wall={is_ifc_wall}, slab={is_ifc_slab}, storey={is_ifc_storey}, opening={is_ifc_opening}")
                 except Exception as e:
                     logger.warning(f"Error calling is_a() method: {e}")
             elif hasattr(window, '__class__'):
                 class_str = str(window.__class__)
                 is_ifc_space = 'IfcSpace' in class_str
                 is_ifc_door = 'IfcDoor' in class_str
-                logger.info(f"Using class string check: class_str={class_str}, is_ifc_space={is_ifc_space}, is_ifc_door={is_ifc_door}")
+                is_ifc_window = 'IfcWindow' in class_str
+                is_ifc_wall = 'IfcWall' in class_str
+                is_ifc_slab = 'IfcSlab' in class_str
+                is_ifc_storey = 'IfcBuildingStorey' in class_str
+                is_ifc_opening = 'IfcOpeningElement' in class_str
+                logger.info(f"Using class string check: class_str={class_str}")
+                logger.info(f"  space={is_ifc_space}, door={is_ifc_door}, window={is_ifc_window}, wall={is_ifc_wall}, slab={is_ifc_slab}, storey={is_ifc_storey}, opening={is_ifc_opening}")
             
-            logger.info(f"Final detection: is_window_object={is_window_object}, is_ifc_space={is_ifc_space}, is_ifc_door={is_ifc_door}")
+            logger.info(f"Final detection: is_window_object={is_window_object}, space={is_ifc_space}, door={is_ifc_door}, window={is_ifc_window}, wall={is_ifc_wall}, slab={is_ifc_slab}, storey={is_ifc_storey}, opening={is_ifc_opening}")
             
-            # Get object ID
+            # Get object ID - ensure uniqueness
             obj_id = None
             if hasattr(window, 'GlobalId'):
                 obj_id = window.GlobalId
@@ -298,16 +345,51 @@ if PYQT6_AVAILABLE:
                     obj_id = str(window.id)
                 logger.info(f"Found id (callable={callable(window.id) if hasattr(window, 'id') else 'N/A'}): {obj_id}")
             
+            # For Window objects, ensure unique ID by including position if available
+            if obj_id and is_window_object:
+                # Add position hash to make ID unique if multiple windows might have same ID
+                if hasattr(window, 'center') and window.center is not None:
+                    center = window.center
+                    # Create a unique identifier from position (rounded to avoid floating point issues)
+                    # Use absolute value of hash to avoid negative numbers
+                    pos_hash = abs(hash(tuple(round(c, 2) for c in center)))
+                    obj_id = f"{obj_id}_pos{pos_hash}"
+                    logger.info(f"Enhanced Window object ID with position hash: {obj_id}")
+                    logger.info(f"  Window center: {center}")
+            
             if obj_id is None:
                 logger.error(f"❌ ISSUE #1: Can't find the object on the model - Object {type(window)} does not have identifiable ID (no GlobalId or id attribute)")
                 logger.error(f"   Object attributes: {dir(window)}")
                 return
             else:
                 logger.info(f"✓ Object ID found: {obj_id}")
+                # Check if this ID is already in cache
+                if obj_id in self.window_meshes:
+                    cached_mesh = self.window_meshes[obj_id]
+                    logger.info(f"  Cached mesh exists: {len(cached_mesh.vertices) if cached_mesh else 0} vertices")
+                else:
+                    logger.info(f"  No cached mesh - will create new one")
             
             # Check if widget is visible - if not, store highlight for later
             if not self.isVisible():
-                obj_type = 'space' if is_ifc_space else ('door' if is_ifc_door else ('window' if is_window_object else 'object'))
+                if is_ifc_space:
+                    obj_type = 'space'
+                elif is_ifc_door:
+                    obj_type = 'door'
+                elif is_ifc_window:
+                    obj_type = 'IFC window'
+                elif is_ifc_wall:
+                    obj_type = 'wall'
+                elif is_ifc_slab:
+                    obj_type = 'slab'
+                elif is_ifc_opening:
+                    obj_type = 'opening'
+                elif is_ifc_storey:
+                    obj_type = 'storey'
+                elif is_window_object:
+                    obj_type = 'window'
+                else:
+                    obj_type = 'object'
                 logger.info(f"Widget not visible - storing highlight for {obj_type} {obj_id} to apply when visible")
                 self.highlighted_window = window
                 # Still create the mesh so it's ready when widget becomes visible
@@ -320,6 +402,26 @@ if PYQT6_AVAILABLE:
                         door_mesh = self._create_door_mesh_from_ifc(window)
                         if door_mesh:
                             self.window_meshes[obj_id] = door_mesh
+                    elif is_ifc_window:
+                        window_mesh = self._create_ifc_window_mesh_from_ifc(window)
+                        if window_mesh:
+                            self.window_meshes[obj_id] = window_mesh
+                    elif is_ifc_wall:
+                        wall_mesh = self._create_wall_mesh_from_ifc(window)
+                        if wall_mesh:
+                            self.window_meshes[obj_id] = wall_mesh
+                    elif is_ifc_slab:
+                        slab_mesh = self._create_slab_mesh_from_ifc(window)
+                        if slab_mesh:
+                            self.window_meshes[obj_id] = slab_mesh
+                    elif is_ifc_opening:
+                        opening_mesh = self._create_opening_mesh_from_ifc(window)
+                        if opening_mesh:
+                            self.window_meshes[obj_id] = opening_mesh
+                    elif is_ifc_storey:
+                        storey_mesh = self._create_storey_mesh_from_ifc(window)
+                        if storey_mesh:
+                            self.window_meshes[obj_id] = storey_mesh
                     else:
                         # Window object or generic object with center/normal/size
                         window_mesh = self._create_window_mesh(window)
@@ -342,6 +444,26 @@ if PYQT6_AVAILABLE:
                         door_mesh = self._create_door_mesh_from_ifc(window)
                         if door_mesh:
                             self.window_meshes[obj_id] = door_mesh
+                    elif is_ifc_window:
+                        window_mesh = self._create_ifc_window_mesh_from_ifc(window)
+                        if window_mesh:
+                            self.window_meshes[obj_id] = window_mesh
+                    elif is_ifc_wall:
+                        wall_mesh = self._create_wall_mesh_from_ifc(window)
+                        if wall_mesh:
+                            self.window_meshes[obj_id] = wall_mesh
+                    elif is_ifc_slab:
+                        slab_mesh = self._create_slab_mesh_from_ifc(window)
+                        if slab_mesh:
+                            self.window_meshes[obj_id] = slab_mesh
+                    elif is_ifc_opening:
+                        opening_mesh = self._create_opening_mesh_from_ifc(window)
+                        if opening_mesh:
+                            self.window_meshes[obj_id] = opening_mesh
+                    elif is_ifc_storey:
+                        storey_mesh = self._create_storey_mesh_from_ifc(window)
+                        if storey_mesh:
+                            self.window_meshes[obj_id] = storey_mesh
                     else:
                         # Window object or generic object with center/normal/size
                         window_mesh = self._create_window_mesh(window)
@@ -350,12 +472,38 @@ if PYQT6_AVAILABLE:
                 return
             
             # Check if main mesh is loaded
-            obj_type = 'space' if is_ifc_space else ('door' if is_ifc_door else ('window' if is_window_object else 'object'))
+            if is_ifc_space:
+                obj_type = 'space'
+            elif is_ifc_door:
+                obj_type = 'door'
+            elif is_ifc_window:
+                obj_type = 'IFC window'
+            elif is_ifc_wall:
+                obj_type = 'wall'
+            elif is_ifc_slab:
+                obj_type = 'slab'
+            elif is_ifc_opening:
+                obj_type = 'opening'
+            elif is_ifc_storey:
+                obj_type = 'storey'
+            elif is_window_object:
+                obj_type = 'window'
+            else:
+                obj_type = 'object'
+            
             if self.mesh is None or len(self.mesh.vertices) == 0:
                 logger.warning(f"Cannot highlight {obj_type} {obj_id}: No mesh loaded in 3D viewer")
                 return
             
-            logger.info(f"Highlighting {obj_type}: {obj_id} (type: {type(window).__name__})")
+            logger.info(f"=== STEP-BY-STEP WINDOW HIGHLIGHTING DIAGNOSTIC ===")
+            logger.info(f"STEP 1: Object type: {obj_type}, ID: {obj_id}, Python type: {type(window).__name__}")
+            logger.info(f"STEP 2: Main mesh loaded: {self.mesh is not None}")
+            if self.mesh is not None:
+                logger.info(f"STEP 2a: Main mesh has {len(self.mesh.vertices):,} vertices, {len(self.mesh.faces):,} faces")
+                logger.info(f"STEP 2b: Main mesh bounds: {self.mesh.bounds}")
+                logger.info(f"STEP 2c: Main mesh center: {self.mesh.centroid}")
+            
+            logger.info(f"STEP 3: Highlighting {obj_type}: {obj_id} (type: {type(window).__name__})")
             self.highlighted_window = window
             
             # Generate mesh if not cached
@@ -380,55 +528,260 @@ if PYQT6_AVAILABLE:
                         logger.error(f"   Door GlobalId: {getattr(window, 'GlobalId', 'N/A')}")
                     else:
                         logger.info(f"✓ Created mesh for door {obj_id} with {len(door_mesh.vertices)} vertices, {len(door_mesh.faces)} faces")
+                elif is_ifc_window:
+                    logger.info(f"Attempting to create IFC window mesh for {obj_id}...")
+                    window_mesh = self._create_ifc_window_mesh_from_ifc(window)
+                    self.window_meshes[obj_id] = window_mesh
+                    if window_mesh is None:
+                        logger.error(f"❌ ISSUE #2: Error on highlight part - Failed to create mesh for IFC window {obj_id}")
+                        logger.error(f"   This means geometry extraction failed. Check logs above for details.")
+                    else:
+                        logger.info(f"✓ Created mesh for IFC window {obj_id} with {len(window_mesh.vertices)} vertices, {len(window_mesh.faces)} faces")
+                elif is_ifc_wall:
+                    logger.info(f"Attempting to create wall mesh for {obj_id}...")
+                    wall_mesh = self._create_wall_mesh_from_ifc(window)
+                    self.window_meshes[obj_id] = wall_mesh
+                    if wall_mesh is None:
+                        logger.error(f"❌ ISSUE #2: Error on highlight part - Failed to create mesh for wall {obj_id}")
+                        logger.error(f"   This means geometry extraction failed. Check logs above for details.")
+                    else:
+                        logger.info(f"✓ Created mesh for wall {obj_id} with {len(wall_mesh.vertices)} vertices, {len(wall_mesh.faces)} faces")
+                elif is_ifc_slab:
+                    logger.info(f"Attempting to create slab mesh for {obj_id}...")
+                    slab_mesh = self._create_slab_mesh_from_ifc(window)
+                    self.window_meshes[obj_id] = slab_mesh
+                    if slab_mesh is None:
+                        logger.error(f"❌ ISSUE #2: Error on highlight part - Failed to create mesh for slab {obj_id}")
+                        logger.error(f"   This means geometry extraction failed. Check logs above for details.")
+                    else:
+                        logger.info(f"✓ Created mesh for slab {obj_id} with {len(slab_mesh.vertices)} vertices, {len(slab_mesh.faces)} faces")
+                elif is_ifc_opening:
+                    logger.info(f"Attempting to create opening mesh for {obj_id}...")
+                    opening_mesh = self._create_opening_mesh_from_ifc(window)
+                    if opening_mesh is None:
+                        logger.warning(f"⚠ Opening {obj_id} has no geometry - this may be normal for some openings")
+                        logger.warning(f"   Some openings are defined by relationships rather than direct geometry")
+                        # Don't cache None - this prevents rendering errors
+                    else:
+                        self.window_meshes[obj_id] = opening_mesh
+                        logger.info(f"✓ Created mesh for opening {obj_id} with {len(opening_mesh.vertices)} vertices, {len(opening_mesh.faces)} faces")
+                elif is_ifc_storey:
+                    logger.info(f"Attempting to create storey mesh for {obj_id}...")
+                    storey_mesh = self._create_storey_mesh_from_ifc(window)
+                    if storey_mesh is None:
+                        logger.warning(f"⚠ Storey {obj_id} has no geometry - this is expected for IfcBuildingStorey")
+                        logger.warning(f"   Storeys are container elements that contain spaces and building elements")
+                        logger.warning(f"   They don't have direct geometry themselves")
+                        # Don't cache None - this prevents rendering errors
+                        # The highlight will be cleared since there's no mesh to show
+                    else:
+                        self.window_meshes[obj_id] = storey_mesh
+                        logger.info(f"✓ Created mesh for storey {obj_id} with {len(storey_mesh.vertices)} vertices, {len(storey_mesh.faces)} faces")
                 else:
                     # Window object or generic object with center/normal/size
-                    logger.info(f"Creating window/object mesh from properties (center, normal, size)")
+                    logger.info(f"STEP 4: Creating window/object mesh from properties (center, normal, size)")
+                    logger.info(f"STEP 4a: Window object properties check:")
+                    logger.info(f"   - Has center: {hasattr(window, 'center')} = {getattr(window, 'center', 'N/A')}")
+                    logger.info(f"   - Has normal: {hasattr(window, 'normal')} = {getattr(window, 'normal', 'N/A')}")
+                    logger.info(f"   - Has size: {hasattr(window, 'size')} = {getattr(window, 'size', 'N/A')}")
                     window_mesh = self._create_window_mesh(window)
                     self.window_meshes[obj_id] = window_mesh
                     if window_mesh is None:
-                        logger.error(f"❌ ISSUE #2: Error on highlight part - Failed to create mesh for {obj_type} {obj_id}")
+                        logger.error(f"❌ STEP 4 FAILED: Error on highlight part - Failed to create mesh for {obj_type} {obj_id}")
                         logger.error(f"   This usually means the object is missing center, normal, or size properties")
                         logger.error(f"   Object has center: {hasattr(window, 'center')}, normal: {hasattr(window, 'normal')}, size: {hasattr(window, 'size')}")
                     else:
-                        logger.info(f"✓ Created mesh for {obj_type} {obj_id} with {len(window_mesh.vertices)} vertices, {len(window_mesh.faces)} faces")
+                        logger.info(f"✓ STEP 4 SUCCESS: Created mesh for {obj_type} {obj_id} with {len(window_mesh.vertices)} vertices, {len(window_mesh.faces)} faces")
+                        logger.info(f"STEP 4b: Window mesh bounds: {window_mesh.bounds}")
+                        logger.info(f"STEP 4c: Window mesh center: {window_mesh.centroid}")
+                        logger.info(f"STEP 4d: Window mesh extents: {window_mesh.extents}")
+                        if self.mesh is not None:
+                            # Check if window is within model bounds
+                            model_bounds = self.mesh.bounds
+                            window_bounds = window_mesh.bounds
+                            logger.info(f"STEP 4e: Coordinate system check:")
+                            logger.info(f"   - Model bounds: {model_bounds}")
+                            logger.info(f"   - Window bounds: {window_bounds}")
+                            # Check if window overlaps with model
+                            window_in_model = (
+                                window_bounds[0][0] <= model_bounds[1][0] and window_bounds[1][0] >= model_bounds[0][0] and
+                                window_bounds[0][1] <= model_bounds[1][1] and window_bounds[1][1] >= model_bounds[0][1] and
+                                window_bounds[0][2] <= model_bounds[1][2] and window_bounds[1][2] >= model_bounds[0][2]
+                            )
+                            logger.info(f"   - Window overlaps model: {window_in_model}")
+                            if not window_in_model:
+                                logger.warning(f"⚠ STEP 4 WARNING: Window bounds do not overlap with model bounds!")
+                                logger.warning(f"   This suggests a coordinate system mismatch - window may not be visible")
             else:
                 logger.info(f"Using cached mesh for {obj_type} {obj_id}")
-                cached_mesh = self.window_meshes[obj_id]
+                cached_mesh = self.window_meshes.get(obj_id)
                 if cached_mesh is None:
-                    logger.error(f"❌ ISSUE #2: Error on highlight part - Cached mesh is None for {obj_id}")
+                    # Check if it was never created or if creation failed
+                    if obj_id in self.window_meshes:
+                        logger.error(f"❌ ISSUE #2: Error on highlight part - Cached mesh is None for {obj_id}")
+                        logger.error(f"   This means mesh creation failed previously. Check logs above for details.")
+                        # Clear the None entry to allow retry
+                        del self.window_meshes[obj_id]
+                    else:
+                        logger.warning(f"⚠ No cached mesh found for {obj_type} {obj_id} - will attempt to create now")
+                        # Retry mesh creation
+                        if is_ifc_space:
+                            cached_mesh = self._create_space_mesh_from_ifc(window)
+                        elif is_ifc_door:
+                            cached_mesh = self._create_door_mesh_from_ifc(window)
+                        elif is_ifc_window:
+                            cached_mesh = self._create_ifc_window_mesh_from_ifc(window)
+                        elif is_ifc_wall:
+                            cached_mesh = self._create_wall_mesh_from_ifc(window)
+                        elif is_ifc_slab:
+                            cached_mesh = self._create_slab_mesh_from_ifc(window)
+                        elif is_ifc_opening:
+                            cached_mesh = self._create_opening_mesh_from_ifc(window)
+                        elif is_ifc_storey:
+                            cached_mesh = self._create_storey_mesh_from_ifc(window)
+                        else:
+                            cached_mesh = self._create_window_mesh(window)
+                        
+                        if cached_mesh:
+                            self.window_meshes[obj_id] = cached_mesh
+                            logger.info(f"✓ Created mesh on retry: {len(cached_mesh.vertices)} vertices, {len(cached_mesh.faces)} faces")
                 else:
                     logger.info(f"✓ Cached mesh available: {len(cached_mesh.vertices)} vertices, {len(cached_mesh.faces)} faces")
             
             # Store highlight type for color selection
             self.highlight_is_space = is_ifc_space
             self.highlight_is_door = is_ifc_door
-            # Note: Window objects (is_window_object) will use default blue color (not space/door)
+            self.highlight_is_window = is_ifc_window
+            self.highlight_is_wall = is_ifc_wall
+            self.highlight_is_slab = is_ifc_slab
+            self.highlight_is_opening = is_ifc_opening
+            self.highlight_is_storey = is_ifc_storey
+            # Note: Window objects (is_window_object) will use default blue color (not IFC elements)
             
             # Force update to redraw with highlight
+            logger.info(f"STEP 5: Preparing to render highlight")
             try:
                 self.makeCurrent()  # Ensure context is current
+                logger.info(f"✓ STEP 5a: OpenGL context is current")
             except Exception as e:
-                logger.warning(f"Could not make OpenGL context current: {e}")
+                logger.warning(f"❌ STEP 5a FAILED: Could not make OpenGL context current: {e}")
+            
+            # Check if mesh is ready for rendering
+            final_mesh = self.window_meshes.get(obj_id)
+            if final_mesh is None:
+                logger.error(f"❌ STEP 5b FAILED: No mesh available for rendering {obj_id}")
+            elif len(final_mesh.vertices) == 0:
+                logger.error(f"❌ STEP 5b FAILED: Mesh has no vertices for {obj_id}")
+            else:
+                logger.info(f"✓ STEP 5b: Mesh ready for rendering: {len(final_mesh.vertices)} vertices, {len(final_mesh.faces)} faces")
+            
             self.update()  # Trigger repaint
-            logger.info(f"Update called for {obj_type} highlight: {obj_id}")
+            logger.info(f"✓ STEP 5c: Update called for {obj_type} highlight: {obj_id}")
+            logger.info(f"=== END OF HIGHLIGHTING DIAGNOSTIC ===")
         
         def _create_window_mesh(self, window):
-            """Create a trimesh representation of a window or object from its properties."""
+            """Create a trimesh representation of a window or object from its properties.
+            First tries to extract actual geometry from IFC file if available, then falls back to simple rectangle.
+            """
             import trimesh
             from models.building import Window
             import logging
             
             logger = logging.getLogger(__name__)
             
+            window_id = getattr(window, 'id', 'unknown')
+            logger.info(f"=== CREATING WINDOW MESH FROM PROPERTIES ===")
+            logger.info(f"Window ID: {window_id}")
+            
+            # Try to extract actual geometry from IFC file first (if available)
+            if hasattr(self, 'ifc_file') and self.ifc_file is not None:
+                logger.info(f"IFC file available - attempting to extract actual geometry for window {window_id}")
+                logger.info(f"Window object type: {type(window).__name__}")
+                logger.info(f"Window object attributes: {[attr for attr in dir(window) if not attr.startswith('_')]}")
+                try:
+                    # Try to find IFC window element by GlobalId
+                    ifc_window = None
+                    try:
+                        # Try by GlobalId first (most common)
+                        ifc_window = self.ifc_file.by_guid(window_id)
+                        if ifc_window and ifc_window.is_a("IfcWindow"):
+                            logger.info(f"✓ Found IFC window element by GlobalId: {window_id}")
+                            logger.info(f"  IFC window GlobalId: {ifc_window.GlobalId}")
+                            logger.info(f"  IFC window type: {ifc_window.is_a()}")
+                        else:
+                            logger.warning(f"⚠ Found element by GlobalId but it's not an IfcWindow: {ifc_window.is_a() if ifc_window else 'None'}")
+                            ifc_window = None
+                    except Exception as guid_error:
+                        logger.debug(f"Could not find by GlobalId: {guid_error}")
+                    
+                    # If not found by GlobalId, try to find by searching all windows
+                    if ifc_window is None:
+                        all_windows = self.ifc_file.by_type("IfcWindow")
+                        logger.info(f"Searching through {len(all_windows)} IFC windows for match...")
+                        for w in all_windows:
+                            w_guid = getattr(w, 'GlobalId', None)
+                            if w_guid == window_id:
+                                ifc_window = w
+                                logger.info(f"✓ Found IFC window element by searching: {window_id}")
+                                logger.info(f"  Matched window GlobalId: {w_guid}")
+                                break
+                            else:
+                                logger.debug(f"  Window {w_guid} does not match {window_id}")
+                        
+                        if ifc_window is None:
+                            logger.warning(f"⚠ Could not find IFC window with GlobalId={window_id} in {len(all_windows)} windows")
+                            logger.warning(f"   Available window GlobalIds: {[getattr(w, 'GlobalId', 'N/A') for w in all_windows[:5]]}...")
+                    
+                    # If found, extract actual geometry
+                    if ifc_window:
+                        logger.info(f"Extracting actual geometry from IFC window element...")
+                        logger.info(f"  IFC Window element: {ifc_window}")
+                        logger.info(f"  IFC Window GlobalId: {getattr(ifc_window, 'GlobalId', 'N/A')}")
+                        logger.info(f"  IFC Window Name: {getattr(ifc_window, 'Name', 'N/A')}")
+                        # Try to get IFC element properties as text for debugging
+                        try:
+                            logger.info(f"  IFC Window attributes: {[attr for attr in dir(ifc_window) if not attr.startswith('_') and not callable(getattr(ifc_window, attr, None))][:10]}")
+                        except:
+                            pass
+                        actual_mesh = self._create_ifc_window_mesh_from_ifc(ifc_window)
+                        if actual_mesh and len(actual_mesh.vertices) > 0:
+                            logger.info(f"✓ Successfully extracted actual geometry: {len(actual_mesh.vertices)} vertices, {len(actual_mesh.faces)} faces")
+                            logger.info(f"   Mesh bounds: {actual_mesh.bounds}")
+                            logger.info(f"   Mesh center: {actual_mesh.centroid}")
+                            # Check if mesh is in model coordinate system
+                            if self.mesh is not None and len(self.mesh.vertices) > 0:
+                                model_bounds = self.mesh.bounds
+                                window_bounds = actual_mesh.bounds
+                                # Check if window overlaps with model
+                                window_in_model = (
+                                    window_bounds[0][0] <= model_bounds[1][0] and window_bounds[1][0] >= model_bounds[0][0] and
+                                    window_bounds[0][1] <= model_bounds[1][1] and window_bounds[1][1] >= model_bounds[0][1] and
+                                    window_bounds[0][2] <= model_bounds[1][2] and window_bounds[1][2] >= model_bounds[0][2]
+                                )
+                                if window_in_model:
+                                    logger.info(f"   ✓ Window mesh is in model coordinate system - overlaps with model bounds")
+                                else:
+                                    logger.warning(f"   ⚠ Window mesh does not overlap with model - coordinate system mismatch")
+                                    logger.warning(f"      Model bounds: {model_bounds}")
+                                    logger.warning(f"      Window bounds: {window_bounds}")
+                            return actual_mesh
+                        else:
+                            logger.warning(f"Could not extract geometry from IFC element, falling back to simple rectangle")
+                except Exception as e:
+                    logger.debug(f"Error extracting from IFC file: {e}, falling back to simple rectangle")
+            
+            # Fallback: Create simple rectangle from properties
+            logger.info(f"Creating simple rectangle from window properties (center, normal, size)")
+            
             # Validate object has required properties (works for Window or any object with these attributes)
             if not hasattr(window, 'center') or window.center is None:
-                logger.warning(f"Object {getattr(window, 'id', 'unknown')} missing center property")
+                logger.warning(f"Object {window_id} missing center property")
                 return None
             if not hasattr(window, 'normal') or window.normal is None:
-                logger.warning(f"Object {getattr(window, 'id', 'unknown')} missing normal property")
+                logger.warning(f"Object {window_id} missing normal property")
                 return None
             if not hasattr(window, 'size') or window.size is None or len(window.size) < 2:
-                logger.warning(f"Object {getattr(window, 'id', 'unknown')} missing or invalid size property")
+                logger.warning(f"Object {window_id} missing or invalid size property")
                 return None
             
             # Window properties
@@ -436,9 +789,181 @@ if PYQT6_AVAILABLE:
             normal = np.array(window.normal)
             width, height = window.size
             
+            # Log window properties for debugging
+            logger.info(f"Window properties (original): center=({center[0]:.2f}, {center[1]:.2f}, {center[2]:.2f}), size=({width:.2f}, {height:.2f}), normal=({normal[0]:.2f}, {normal[1]:.2f}, {normal[2]:.2f})")
+            
+            # CRITICAL FIX: Transform window coordinates to match model coordinate system
+            # If model is loaded, check if window coordinates need transformation
+            if self.mesh is not None and len(self.mesh.vertices) > 0:
+                model_bounds = self.mesh.bounds
+                model_center = self.mesh.centroid
+                
+                # Check if window is in a completely different coordinate system
+                # Model is typically in local coordinates (small numbers)
+                # Windows from IFC are often in world coordinates (large numbers)
+                window_distance_from_model = np.linalg.norm(center - model_center)
+                model_size = np.linalg.norm(model_bounds[1] - model_bounds[0])
+                
+                logger.info(f"STEP 4f: Coordinate transformation check:")
+                logger.info(f"   - Model center: {model_center}")
+                logger.info(f"   - Window center (original): {center}")
+                logger.info(f"   - Distance from model: {window_distance_from_model:.2f}")
+                logger.info(f"   - Model size: {model_size:.2f}")
+                
+                # If window is very far from model (more than 10x model size), transform it
+                if window_distance_from_model > model_size * 10:
+                    logger.warning(f"⚠ Window coordinates are in different coordinate system - applying transformation")
+                    logger.warning(f"   Window is {window_distance_from_model:.2f} units away, model size is {model_size:.2f}")
+                    
+                    # Try to find the window in the IFC file and extract its actual geometry
+                    # This will be in the same coordinate system as the model mesh
+                    if hasattr(self, 'ifc_file') and self.ifc_file is not None:
+                        logger.info(f"   Attempting to find window in IFC file by GlobalId...")
+                        try:
+                            # Search all windows in IFC file
+                            all_ifc_windows = self.ifc_file.by_type("IfcWindow")
+                            logger.info(f"   Found {len(all_ifc_windows)} IFC windows in file")
+                            
+                            # Try to match by GlobalId
+                            matched_ifc_window = None
+                            for ifc_win in all_ifc_windows:
+                                if hasattr(ifc_win, 'GlobalId') and ifc_win.GlobalId == window_id:
+                                    matched_ifc_window = ifc_win
+                                    logger.info(f"   ✓ Found matching IFC window by GlobalId: {window_id}")
+                                    break
+                            
+                            # If found, extract actual geometry (in model coordinate system)
+                            if matched_ifc_window:
+                                logger.info(f"   Extracting actual geometry from IFC window element...")
+                                actual_mesh = self._create_ifc_window_mesh_from_ifc(matched_ifc_window)
+                                if actual_mesh and len(actual_mesh.vertices) > 0:
+                                    logger.info(f"   ✓ Successfully extracted geometry in model coordinate system")
+                                    logger.info(f"      Mesh bounds: {actual_mesh.bounds}")
+                                    logger.info(f"      Mesh center: {actual_mesh.centroid}")
+                                    return actual_mesh
+                                else:
+                                    logger.warning(f"   Could not extract geometry from IFC element")
+                        except Exception as e:
+                            logger.debug(f"   Error searching IFC file: {e}")
+                    
+                    # Fallback: Transform window to model coordinate system
+                    # Calculate transformation to preserve relative positions
+                    logger.warning(f"   Applying coordinate transformation to preserve relative window positions")
+                    
+                    # Calculate transformation offset
+                    # Strategy: Extract actual geometry from IFC first (best solution)
+                    # If that fails, calculate transformation to map window coordinates to model coordinates
+                    # Cache the transformation so all windows use the same offset (preserves relative positions)
+                    
+                    # First, try to extract actual geometry from IFC (this should be in correct coordinate system)
+                    if hasattr(self, 'ifc_file') and self.ifc_file is not None:
+                        logger.info(f"   Attempting to extract actual geometry from IFC file...")
+                        try:
+                            # Try to find window in IFC by GlobalId
+                            ifc_window = None
+                            try:
+                                ifc_window = self.ifc_file.by_guid(window_id)
+                                if ifc_window and ifc_window.is_a("IfcWindow"):
+                                    logger.info(f"   ✓ Found IFC window element by GlobalId: {window_id}")
+                                else:
+                                    ifc_window = None
+                            except:
+                                pass
+                            
+                            if ifc_window is None:
+                                # Search all windows
+                                all_ifc_windows = self.ifc_file.by_type("IfcWindow")
+                                for w in all_ifc_windows:
+                                    if hasattr(w, 'GlobalId') and w.GlobalId == window_id:
+                                        ifc_window = w
+                                        logger.info(f"   ✓ Found IFC window element by searching: {window_id}")
+                                        break
+                            
+                            if ifc_window:
+                                # Extract geometry using _create_ifc_window_mesh_from_ifc
+                                # This will use the correct coordinate system
+                                logger.info(f"   Extracting geometry from IFC window element (will use correct coordinate system)...")
+                                # Note: This will be called from _create_window_mesh, so we'll return early
+                                # Actually, we can't return here because we're in the middle of _create_window_mesh
+                                # So we'll let it continue and the IFC extraction will happen in the earlier check
+                                pass
+                        except Exception as e:
+                            logger.debug(f"   Error searching IFC file for geometry extraction: {e}")
+                    
+                    # Calculate transformation offset if not cached
+                    # This is a fallback when IFC geometry extraction fails
+                    if self.window_coordinate_transform is None:
+                        # Calculate transformation offset using building's window positions
+                        if hasattr(self, 'building') and self.building and len(self.building.windows) > 0:
+                            # Calculate centroid of all windows in world coordinates
+                            window_centers = [np.array(w.center) for w in self.building.windows]
+                            if window_centers:
+                                windows_centroid = np.mean(window_centers, axis=0)
+                                # Calculate offset: how to transform from window coordinate system to model coordinate system
+                                # The offset should map windows_centroid to model_center
+                                # Formula: model_center = windows_centroid + offset
+                                # Therefore: offset = model_center - windows_centroid
+                                self.window_coordinate_transform = model_center - windows_centroid
+                                logger.info(f"   Calculated transformation offset from {len(self.building.windows)} windows")
+                                logger.info(f"   Windows centroid (world): {windows_centroid}")
+                                logger.info(f"   Model center (local): {model_center}")
+                                logger.info(f"   Transformation offset (cached): {self.window_coordinate_transform}")
+                    
+                    # Apply cached transformation to this window
+                    if self.window_coordinate_transform is not None:
+                        center = center + self.window_coordinate_transform
+                        logger.info(f"   Applied cached transformation - transformed window center: {center}")
+                        # Validate transformed position
+                        if self.mesh is not None:
+                            model_bounds = self.mesh.bounds
+                            # Check if transformed center is within reasonable range of model
+                            center_distance = np.linalg.norm(center - model_center)
+                            model_size = np.linalg.norm(model_bounds[1] - model_bounds[0])
+                            if center_distance > model_size * 2:
+                                logger.warning(f"   ⚠ Transformed window is still far from model ({center_distance:.2f} units, model size: {model_size:.2f})")
+                                logger.warning(f"   ⚠ Transformation failed - window will not be visible")
+                                logger.warning(f"   ⚠ SOLUTION: Extract actual geometry from IFC file (should be in correct coordinate system)")
+                                # Try to extract from IFC as last resort
+                                if hasattr(self, 'ifc_file') and self.ifc_file is not None:
+                                    logger.info(f"   Attempting IFC geometry extraction as fallback...")
+                                    try:
+                                        ifc_window = self.ifc_file.by_guid(window_id)
+                                        if ifc_window and ifc_window.is_a("IfcWindow"):
+                                            logger.info(f"   Found IFC window - extracting geometry...")
+                                            ifc_mesh = self._create_ifc_window_mesh_from_ifc(ifc_window)
+                                            if ifc_mesh and len(ifc_mesh.vertices) > 0:
+                                                logger.info(f"   ✓ Successfully extracted IFC geometry - using it instead of transformation")
+                                                return ifc_mesh
+                                    except:
+                                        pass
+                                # If IFC extraction also fails, place window at model center as last resort
+                                logger.warning(f"   ⚠ Placing window at model center as last resort (may not be accurate)")
+                                center = model_center.copy()
+                    else:
+                        # Fallback: Use simple offset calculation when building is not available
+                        # This is a last resort - ideally we should have the building object
+                        # For now, we'll calculate a relative position within model bounds
+                        # This preserves some relative positioning but is not perfect
+                        model_min = model_bounds[0]
+                        model_max = model_bounds[1]
+                        model_range = model_max - model_min
+                        
+                        # Calculate a relative position within model bounds
+                        # Use window's position relative to a reference point (e.g., first window or model origin)
+                        # Scale the window position to fit within model bounds
+                        # This is approximate - best solution is to extract from IFC or use building reference
+                        logger.warning(f"   ⚠ No building reference available - using model center as fallback")
+                        logger.warning(f"   ⚠ All windows will appear at model center - this is a limitation")
+                        logger.warning(f"   ⚠ To fix: Ensure building object is set or extract geometry from IFC")
+                        # Place at model center as last resort
+                        center = model_center.copy()
+                        logger.info(f"   Transformed window center to model center: {center}")
+                else:
+                    logger.info(f"   ✓ Window coordinates are in same coordinate system as model")
+            
             # Validate size values
             if width <= 0 or height <= 0:
-                logger.warning(f"Window {window.id} has invalid size: {width}x{height}")
+                logger.warning(f"Window {window_id} has invalid size: {width}x{height}")
                 return None
             
             # Normalize normal vector
@@ -490,23 +1015,54 @@ if PYQT6_AVAILABLE:
             half_width = width / 2.0
             half_height = height / 2.0
             
-            # Four corners of the rectangle
-            corners = [
-                center + (-half_width * right) + (-half_height * up),
-                center + (half_width * right) + (-half_height * up),
-                center + (half_width * right) + (half_height * up),
-                center + (-half_width * right) + (half_height * up)
+            # Add small thickness to make window visible from all angles
+            # Use 5% of the smaller dimension as thickness, but at least 0.05m
+            thickness = max(0.05, min(width, height) * 0.05)
+            half_thickness = thickness / 2.0
+            
+            # Create a thin box (extruded rectangle) instead of flat rectangle
+            # Front face (in direction of normal)
+            front_corners = [
+                center + (half_thickness * normal) + (-half_width * right) + (-half_height * up),
+                center + (half_thickness * normal) + (half_width * right) + (-half_height * up),
+                center + (half_thickness * normal) + (half_width * right) + (half_height * up),
+                center + (half_thickness * normal) + (-half_width * right) + (half_height * up)
             ]
             
-            # Create two triangles to form the rectangle
-            vertices = np.array(corners)
+            # Back face (opposite direction of normal)
+            back_corners = [
+                center + (-half_thickness * normal) + (-half_width * right) + (-half_height * up),
+                center + (-half_thickness * normal) + (half_width * right) + (-half_height * up),
+                center + (-half_thickness * normal) + (half_width * right) + (half_height * up),
+                center + (-half_thickness * normal) + (-half_width * right) + (half_height * up)
+            ]
+            
+            # Combine all vertices: front face (0-3), back face (4-7)
+            vertices = np.array(front_corners + back_corners)
+            
+            # Create faces for the box:
+            # Front face (2 triangles)
+            # Back face (2 triangles)
+            # 4 side faces (each with 2 triangles)
             faces = np.array([
-                [0, 1, 2],  # First triangle
-                [0, 2, 3]   # Second triangle
+                # Front face
+                [0, 1, 2], [0, 2, 3],
+                # Back face (reversed winding)
+                [4, 6, 5], [4, 7, 6],
+                # Side faces
+                [0, 4, 5], [0, 5, 1],  # Bottom
+                [1, 5, 6], [1, 6, 2],  # Right
+                [2, 6, 7], [2, 7, 3],  # Top
+                [3, 7, 4], [3, 4, 0]   # Left
             ])
             
             # Create trimesh
             window_mesh = trimesh.Trimesh(vertices=vertices, faces=faces)
+            logger.info(f"✓ Created window mesh: {len(window_mesh.vertices)} vertices, {len(window_mesh.faces)} faces")
+            logger.info(f"   Mesh bounds: {window_mesh.bounds}")
+            logger.info(f"   Mesh center: {window_mesh.centroid}")
+            logger.info(f"   Mesh size: {window_mesh.extents}")
+            logger.info(f"   Thickness: {thickness:.3f}m (added for visibility)")
             return window_mesh
         
         def _create_space_mesh_from_ifc(self, space_element):
@@ -728,6 +1284,549 @@ if PYQT6_AVAILABLE:
                 logger.warning(f"Error creating door mesh from IFC: {e}", exc_info=True)
                 return None
         
+        def _extract_ifc_element_data_as_text(self, element) -> str:
+            """Extract IFC element data as text for debugging.
+            
+            Args:
+                element: IFC element (IfcWindow, IfcDoor, etc.)
+                
+            Returns:
+                String representation of element data
+            """
+            import logging
+            logger = logging.getLogger(__name__)
+            
+            try:
+                lines = []
+                lines.append(f"=== IFC ELEMENT DATA ===")
+                lines.append(f"Type: {element.is_a() if hasattr(element, 'is_a') else type(element).__name__}")
+                lines.append(f"GlobalId: {getattr(element, 'GlobalId', 'N/A')}")
+                lines.append(f"Name: {getattr(element, 'Name', 'N/A')}")
+                
+                # Extract placement/position
+                if hasattr(element, 'ObjectPlacement'):
+                    placement = element.ObjectPlacement
+                    lines.append(f"ObjectPlacement: {placement}")
+                    if hasattr(placement, 'RelativePlacement'):
+                        rel_placement = placement.RelativePlacement
+                        if hasattr(rel_placement, 'Location'):
+                            location = rel_placement.Location
+                            if hasattr(location, 'Coordinates'):
+                                coords = location.Coordinates
+                                lines.append(f"  Location Coordinates: {coords}")
+                
+                # Extract properties
+                if hasattr(element, 'HasProperties'):
+                    props = []
+                    for prop in element.HasProperties:
+                        if hasattr(prop, 'Name') and hasattr(prop, 'NominalValue'):
+                            prop_name = prop.Name
+                            prop_val = getattr(prop.NominalValue, 'wrappedValue', prop.NominalValue) if hasattr(prop.NominalValue, 'wrappedValue') else prop.NominalValue
+                            props.append(f"{prop_name}={prop_val}")
+                    if props:
+                        lines.append(f"Properties: {', '.join(props[:5])}")  # First 5 properties
+                
+                # Extract material
+                if hasattr(element, 'HasAssociations'):
+                    for assoc in element.HasAssociations:
+                        if hasattr(assoc, 'is_a') and assoc.is_a("IfcRelAssociatesMaterial"):
+                            material = assoc.RelatingMaterial
+                            lines.append(f"Material: {getattr(material, 'Name', material)}")
+                            break
+                
+                return "\n".join(lines)
+            except Exception as e:
+                logger.debug(f"Error extracting IFC element data: {e}")
+                return f"Error extracting data: {e}"
+        
+        def _create_ifc_window_mesh_from_ifc(self, window_element):
+            """Create a trimesh representation of an IFC window from its geometry.
+            Uses the SAME coordinate system settings as the model mesh generation.
+            """
+            import trimesh
+            import logging
+            logger = logging.getLogger(__name__)
+            
+            window_id = getattr(window_element, 'GlobalId', None) or getattr(window_element, 'id', None)
+            logger.info(f"=== CREATING IFC WINDOW MESH ===")
+            logger.info(f"Window ID: {window_id}")
+            logger.info(f"Window type: {type(window_element).__name__}")
+            
+            # Extract IFC element data as text for debugging
+            element_data = self._extract_ifc_element_data_as_text(window_element)
+            logger.info(f"IFC Element Data:\n{element_data}")
+            
+            try:
+                import ifcopenshell
+                import ifcopenshell.geom as geom
+                logger.info("✓ ifcopenshell.geom imported successfully")
+                
+                settings = geom.settings()
+                # CRITICAL: Use the EXACT SAME settings as model mesh generation
+                # The model mesh is generated with USE_WORLD_COORDS=True (see ifc_importer.py line 1411)
+                # Even though the resulting mesh has small coordinates, we must use the same setting
+                # to ensure window geometry is in the same coordinate system
+                use_world_coords = True  # Match model mesh generation setting
+                
+                if self.mesh is not None and len(self.mesh.vertices) > 0:
+                    model_bounds = self.mesh.bounds
+                    model_center = self.mesh.centroid
+                    model_size = np.linalg.norm(model_bounds[1] - model_bounds[0])
+                    logger.info(f"Model bounds: {model_bounds}")
+                    logger.info(f"Model center: {model_center}")
+                    logger.info(f"Model size: {model_size:.2f}")
+                    logger.info(f"Using USE_WORLD_COORDS=True to match model mesh generation (from ifc_importer.py)")
+                
+                try:
+                    if hasattr(settings, 'USE_WORLD_COORDS'):
+                        settings.set(settings.USE_WORLD_COORDS, use_world_coords)
+                        logger.info(f"✓ Set USE_WORLD_COORDS={use_world_coords} to match model mesh generation")
+                    else:
+                        logger.warning("⚠ USE_WORLD_COORDS setting not available in this ifcopenshell version")
+                except Exception as e:
+                    logger.debug(f"Could not set USE_WORLD_COORDS: {e}")
+                
+                # Also match other settings from model mesh generation
+                try:
+                    if hasattr(settings, 'USE_BREP_DATA'):
+                        settings.set(settings.USE_BREP_DATA, False)  # Match model mesh generation
+                except:
+                    pass
+                try:
+                    if hasattr(settings, 'SEW_SHELLS'):
+                        settings.set(settings.SEW_SHELLS, True)  # Match model mesh generation
+                except:
+                    pass
+                
+                logger.info(f"Attempting to create shape from IFC window element...")
+                try:
+                    shape = geom.create_shape(settings, window_element)
+                    if not shape:
+                        logger.error(f"❌ ISSUE #2: Could not create shape for IFC window {window_id}")
+                        return None
+                    logger.info("✓ Shape created successfully")
+                except Exception as e:
+                    logger.error(f"❌ ISSUE #2: Exception creating shape for IFC window {window_id}: {e}", exc_info=True)
+                    return None
+                
+                geometry = shape.geometry
+                if not geometry:
+                    logger.error(f"❌ ISSUE #2: IFC window {window_id} has no geometry")
+                    return None
+                logger.info("✓ Geometry extracted from shape")
+                
+                vertices = None
+                faces = None
+                
+                if hasattr(geometry, 'verts') and hasattr(geometry, 'faces'):
+                    try:
+                        verts = geometry.verts
+                        faces_data = geometry.faces
+                        logger.info(f"✓ Extracted verts and faces: {len(verts) if verts is not None else 'None'} vertices, {len(faces_data) if faces_data is not None else 'None'} faces")
+                        
+                        vertices = np.array(verts, dtype=np.float64)
+                        if len(vertices.shape) == 1:
+                            if len(vertices) % 3 == 0:
+                                vertices = vertices.reshape(-1, 3)
+                            else:
+                                logger.error(f"❌ ISSUE #2: Invalid vertex count: {len(vertices)} (not divisible by 3)")
+                                return None
+                        elif len(vertices.shape) == 2 and vertices.shape[1] != 3:
+                            logger.error(f"❌ ISSUE #2: Invalid vertex shape: {vertices.shape}")
+                            return None
+                        
+                        faces = np.array(faces_data, dtype=np.int32)
+                        if len(faces.shape) == 1:
+                            if len(faces) % 3 == 0:
+                                faces = faces.reshape(-1, 3)
+                            else:
+                                logger.error(f"❌ ISSUE #2: Invalid face count: {len(faces)} (not divisible by 3)")
+                                return None
+                        elif len(faces.shape) == 2 and faces.shape[1] != 3:
+                            logger.error(f"❌ ISSUE #2: Invalid face shape: {faces.shape}")
+                            return None
+                        logger.info(f"✓ Successfully converted to numpy arrays: {len(vertices)} vertices, {len(faces)} faces")
+                    except Exception as e:
+                        logger.error(f"❌ ISSUE #2: Failed to extract geometry: {e}", exc_info=True)
+                        return None
+                else:
+                    logger.error(f"❌ ISSUE #2: Geometry object missing 'verts' or 'faces' attributes")
+                    return None
+                
+                if vertices is not None and faces is not None and len(vertices) > 0 and len(faces) > 0:
+                    try:
+                        if len(faces) > 0:
+                            max_vertex_idx = np.max(faces)
+                            if max_vertex_idx >= len(vertices):
+                                logger.error(f"❌ ISSUE #2: Face indices out of range: max index {max_vertex_idx}, but only {len(vertices)} vertices")
+                                return None
+                        
+                        window_mesh = trimesh.Trimesh(vertices=vertices, faces=faces)
+                        logger.info(f"✓ Created IFC window mesh successfully: {len(vertices)} vertices, {len(faces)} faces")
+                        return window_mesh
+                    except Exception as mesh_error:
+                        logger.error(f"❌ ISSUE #2: Failed to create trimesh: {mesh_error}", exc_info=True)
+                        return None
+                else:
+                    logger.error(f"❌ ISSUE #2: Could not extract valid geometry for IFC window {window_id}")
+                    return None
+                    
+            except ImportError:
+                logger.warning("ifcopenshell.geom not available - cannot extract IFC window geometry")
+                return None
+            except Exception as e:
+                logger.warning(f"Error creating IFC window mesh from IFC: {e}", exc_info=True)
+                return None
+        
+        def _create_wall_mesh_from_ifc(self, wall_element):
+            """Create a trimesh representation of an IFC wall from its geometry."""
+            import trimesh
+            import logging
+            logger = logging.getLogger(__name__)
+            
+            wall_id = getattr(wall_element, 'GlobalId', None) or getattr(wall_element, 'id', None)
+            logger.info(f"=== CREATING WALL MESH ===")
+            logger.info(f"Wall ID: {wall_id}")
+            
+            try:
+                import ifcopenshell
+                import ifcopenshell.geom as geom
+                
+                settings = geom.settings()
+                try:
+                    if hasattr(settings, 'USE_WORLD_COORDS'):
+                        settings.set(settings.USE_WORLD_COORDS, True)
+                except:
+                    pass
+                
+                shape = geom.create_shape(settings, wall_element)
+                if not shape:
+                    logger.error(f"❌ ISSUE #2: Could not create shape for wall {wall_id}")
+                    return None
+                
+                geometry = shape.geometry
+                if not geometry:
+                    logger.error(f"❌ ISSUE #2: Wall {wall_id} has no geometry")
+                    return None
+                
+                if hasattr(geometry, 'verts') and hasattr(geometry, 'faces'):
+                    try:
+                        verts = geometry.verts
+                        faces_data = geometry.faces
+                        
+                        vertices = np.array(verts, dtype=np.float64)
+                        if len(vertices.shape) == 1:
+                            if len(vertices) % 3 == 0:
+                                vertices = vertices.reshape(-1, 3)
+                            else:
+                                return None
+                        
+                        faces = np.array(faces_data, dtype=np.int32)
+                        if len(faces.shape) == 1:
+                            if len(faces) % 3 == 0:
+                                faces = faces.reshape(-1, 3)
+                            else:
+                                return None
+                        
+                        if len(faces) > 0:
+                            max_vertex_idx = np.max(faces)
+                            if max_vertex_idx >= len(vertices):
+                                return None
+                        
+                        wall_mesh = trimesh.Trimesh(vertices=vertices, faces=faces)
+                        logger.info(f"✓ Created wall mesh: {len(vertices)} vertices, {len(faces)} faces")
+                        return wall_mesh
+                    except Exception as e:
+                        logger.error(f"❌ ISSUE #2: Failed to extract geometry: {e}", exc_info=True)
+                        return None
+                else:
+                    logger.error(f"❌ ISSUE #2: Geometry object missing 'verts' or 'faces' attributes")
+                    return None
+                    
+            except ImportError:
+                logger.warning("ifcopenshell.geom not available - cannot extract wall geometry")
+                return None
+            except Exception as e:
+                logger.warning(f"Error creating wall mesh from IFC: {e}", exc_info=True)
+                return None
+        
+        def _create_slab_mesh_from_ifc(self, slab_element):
+            """Create a trimesh representation of an IFC slab from its geometry."""
+            import trimesh
+            import logging
+            logger = logging.getLogger(__name__)
+            
+            slab_id = getattr(slab_element, 'GlobalId', None) or getattr(slab_element, 'id', None)
+            logger.info(f"=== CREATING SLAB MESH ===")
+            logger.info(f"Slab ID: {slab_id}")
+            
+            try:
+                import ifcopenshell
+                import ifcopenshell.geom as geom
+                
+                settings = geom.settings()
+                try:
+                    if hasattr(settings, 'USE_WORLD_COORDS'):
+                        settings.set(settings.USE_WORLD_COORDS, True)
+                except:
+                    pass
+                
+                shape = geom.create_shape(settings, slab_element)
+                if not shape:
+                    logger.error(f"❌ ISSUE #2: Could not create shape for slab {slab_id}")
+                    return None
+                
+                geometry = shape.geometry
+                if not geometry:
+                    logger.error(f"❌ ISSUE #2: Slab {slab_id} has no geometry")
+                    return None
+                
+                if hasattr(geometry, 'verts') and hasattr(geometry, 'faces'):
+                    try:
+                        verts = geometry.verts
+                        faces_data = geometry.faces
+                        
+                        vertices = np.array(verts, dtype=np.float64)
+                        if len(vertices.shape) == 1:
+                            if len(vertices) % 3 == 0:
+                                vertices = vertices.reshape(-1, 3)
+                            else:
+                                return None
+                        
+                        faces = np.array(faces_data, dtype=np.int32)
+                        if len(faces.shape) == 1:
+                            if len(faces) % 3 == 0:
+                                faces = faces.reshape(-1, 3)
+                            else:
+                                return None
+                        
+                        if len(faces) > 0:
+                            max_vertex_idx = np.max(faces)
+                            if max_vertex_idx >= len(vertices):
+                                return None
+                        
+                        slab_mesh = trimesh.Trimesh(vertices=vertices, faces=faces)
+                        logger.info(f"✓ Created slab mesh: {len(vertices)} vertices, {len(faces)} faces")
+                        return slab_mesh
+                    except Exception as e:
+                        logger.error(f"❌ ISSUE #2: Failed to extract geometry: {e}", exc_info=True)
+                        return None
+                else:
+                    logger.error(f"❌ ISSUE #2: Geometry object missing 'verts' or 'faces' attributes")
+                    return None
+                    
+            except ImportError:
+                logger.warning("ifcopenshell.geom not available - cannot extract slab geometry")
+                return None
+            except Exception as e:
+                logger.warning(f"Error creating slab mesh from IFC: {e}", exc_info=True)
+                return None
+        
+        def _create_opening_mesh_from_ifc(self, opening_element):
+            """Create a trimesh representation of an IFC opening element from its geometry."""
+            import trimesh
+            import logging
+            logger = logging.getLogger(__name__)
+            
+            opening_id = getattr(opening_element, 'GlobalId', None) or getattr(opening_element, 'id', None)
+            logger.info(f"=== CREATING OPENING MESH ===")
+            logger.info(f"Opening ID: {opening_id}")
+            logger.info(f"Opening type: {type(opening_element).__name__}")
+            
+            try:
+                import ifcopenshell
+                import ifcopenshell.geom as geom
+                logger.info("✓ ifcopenshell.geom imported successfully")
+                
+                settings = geom.settings()
+                try:
+                    if hasattr(settings, 'USE_WORLD_COORDS'):
+                        settings.set(settings.USE_WORLD_COORDS, True)
+                        logger.info("✓ Enabled USE_WORLD_COORDS")
+                except Exception as e:
+                    logger.debug(f"Could not set USE_WORLD_COORDS: {e}")
+                
+                logger.info(f"Attempting to create shape from opening element...")
+                try:
+                    shape = geom.create_shape(settings, opening_element)
+                    if not shape:
+                        logger.error(f"❌ ISSUE #2: Could not create shape for opening {opening_id}")
+                        logger.error(f"   geom.create_shape() returned None or False")
+                        return None
+                    logger.info("✓ Shape created successfully")
+                except RuntimeError as e:
+                    error_msg = str(e)
+                    if "Representation is NULL" in error_msg or "NULL" in error_msg:
+                        logger.warning(f"⚠ Opening {opening_id} has no geometry representation (NULL)")
+                        logger.warning(f"   This is common for openings - they may be defined by relationships rather than geometry")
+                        return None
+                    else:
+                        logger.error(f"❌ ISSUE #2: Exception creating shape for opening {opening_id}: {e}", exc_info=True)
+                        return None
+                except Exception as e:
+                    logger.error(f"❌ ISSUE #2: Exception creating shape for opening {opening_id}: {e}", exc_info=True)
+                    return None
+                
+                geometry = shape.geometry
+                if not geometry:
+                    logger.error(f"❌ ISSUE #2: Opening {opening_id} has no geometry")
+                    logger.error(f"   shape.geometry is None or empty")
+                    return None
+                logger.info("✓ Geometry extracted from shape")
+                
+                vertices = None
+                faces = None
+                
+                if hasattr(geometry, 'verts') and hasattr(geometry, 'faces'):
+                    try:
+                        verts = geometry.verts
+                        faces_data = geometry.faces
+                        logger.info(f"✓ Extracted verts and faces: {len(verts) if verts is not None else 'None'} vertices, {len(faces_data) if faces_data is not None else 'None'} faces")
+                        
+                        vertices = np.array(verts, dtype=np.float64)
+                        if len(vertices.shape) == 1:
+                            if len(vertices) % 3 == 0:
+                                vertices = vertices.reshape(-1, 3)
+                            else:
+                                logger.error(f"❌ ISSUE #2: Invalid vertex count: {len(vertices)} (not divisible by 3)")
+                                return None
+                        elif len(vertices.shape) == 2 and vertices.shape[1] != 3:
+                            logger.error(f"❌ ISSUE #2: Invalid vertex shape: {vertices.shape}")
+                            return None
+                        
+                        faces = np.array(faces_data, dtype=np.int32)
+                        if len(faces.shape) == 1:
+                            if len(faces) % 3 == 0:
+                                faces = faces.reshape(-1, 3)
+                            else:
+                                logger.error(f"❌ ISSUE #2: Invalid face count: {len(faces)} (not divisible by 3)")
+                                return None
+                        elif len(faces.shape) == 2 and faces.shape[1] != 3:
+                            logger.error(f"❌ ISSUE #2: Invalid face shape: {faces.shape}")
+                            return None
+                        logger.info(f"✓ Successfully converted to numpy arrays: {len(vertices)} vertices, {len(faces)} faces")
+                    except Exception as e:
+                        logger.error(f"❌ ISSUE #2: Failed to extract geometry: {e}", exc_info=True)
+                        return None
+                else:
+                    logger.error(f"❌ ISSUE #2: Geometry object missing 'verts' or 'faces' attributes")
+                    return None
+                
+                if vertices is not None and faces is not None and len(vertices) > 0 and len(faces) > 0:
+                    try:
+                        if len(faces) > 0:
+                            max_vertex_idx = np.max(faces)
+                            if max_vertex_idx >= len(vertices):
+                                logger.error(f"❌ ISSUE #2: Face indices out of range: max index {max_vertex_idx}, but only {len(vertices)} vertices")
+                                return None
+                        
+                        opening_mesh = trimesh.Trimesh(vertices=vertices, faces=faces)
+                        logger.info(f"✓ Created opening mesh successfully: {len(vertices)} vertices, {len(faces)} faces")
+                        logger.info(f"   Mesh bounds: {opening_mesh.bounds}")
+                        logger.info(f"   Mesh center: {opening_mesh.centroid}")
+                        return opening_mesh
+                    except Exception as mesh_error:
+                        logger.error(f"❌ ISSUE #2: Failed to create trimesh: {mesh_error}", exc_info=True)
+                        return None
+                else:
+                    logger.error(f"❌ ISSUE #2: Could not extract valid geometry for opening {opening_id}")
+                    return None
+                    
+            except ImportError:
+                logger.warning("ifcopenshell.geom not available - cannot extract opening geometry")
+                return None
+            except Exception as e:
+                logger.warning(f"Error creating opening mesh from IFC: {e}", exc_info=True)
+                return None
+        
+        def _create_storey_mesh_from_ifc(self, storey_element):
+            """Create a trimesh representation of an IFC building storey from its geometry."""
+            import trimesh
+            import logging
+            logger = logging.getLogger(__name__)
+            
+            storey_id = getattr(storey_element, 'GlobalId', None) or getattr(storey_element, 'id', None)
+            logger.info(f"=== CREATING STOREY MESH ===")
+            logger.info(f"Storey ID: {storey_id}")
+            logger.warning(f"⚠ Note: IfcBuildingStorey typically has no direct geometry - it contains spaces and elements")
+            logger.warning(f"   Attempting to extract geometry anyway...")
+            
+            try:
+                import ifcopenshell
+                import ifcopenshell.geom as geom
+                
+                settings = geom.settings()
+                try:
+                    if hasattr(settings, 'USE_WORLD_COORDS'):
+                        settings.set(settings.USE_WORLD_COORDS, True)
+                except:
+                    pass
+                
+                try:
+                    shape = geom.create_shape(settings, storey_element)
+                    if not shape:
+                        logger.warning(f"⚠ Could not create shape for storey {storey_id} - storeys typically have no direct geometry")
+                        return None
+                except RuntimeError as e:
+                    error_msg = str(e)
+                    if "Representation is NULL" in error_msg or "NULL" in error_msg:
+                        logger.warning(f"⚠ Storey {storey_id} has no geometry representation (NULL)")
+                        logger.warning(f"   This is expected - IfcBuildingStorey is a container element with no direct geometry")
+                        logger.warning(f"   Storeys contain spaces and building elements, but don't have geometry themselves")
+                        return None
+                    else:
+                        logger.warning(f"⚠ Error creating shape for storey {storey_id}: {e}")
+                        return None
+                except Exception as e:
+                    logger.warning(f"⚠ Error creating shape for storey {storey_id}: {e}")
+                    return None
+                
+                geometry = shape.geometry
+                if not geometry:
+                    logger.warning(f"⚠ Storey {storey_id} has no geometry - storeys typically contain elements, not geometry themselves")
+                    return None
+                
+                if hasattr(geometry, 'verts') and hasattr(geometry, 'faces'):
+                    try:
+                        verts = geometry.verts
+                        faces_data = geometry.faces
+                        
+                        vertices = np.array(verts, dtype=np.float64)
+                        if len(vertices.shape) == 1:
+                            if len(vertices) % 3 == 0:
+                                vertices = vertices.reshape(-1, 3)
+                            else:
+                                return None
+                        
+                        faces = np.array(faces_data, dtype=np.int32)
+                        if len(faces.shape) == 1:
+                            if len(faces) % 3 == 0:
+                                faces = faces.reshape(-1, 3)
+                            else:
+                                return None
+                        
+                        if len(faces) > 0:
+                            max_vertex_idx = np.max(faces)
+                            if max_vertex_idx >= len(vertices):
+                                return None
+                        
+                        storey_mesh = trimesh.Trimesh(vertices=vertices, faces=faces)
+                        logger.info(f"✓ Created storey mesh: {len(vertices)} vertices, {len(faces)} faces")
+                        return storey_mesh
+                    except Exception as e:
+                        logger.warning(f"⚠ Failed to extract geometry: {e}")
+                        return None
+                else:
+                    logger.warning(f"⚠ Geometry object missing 'verts' or 'faces' attributes")
+                    return None
+                    
+            except ImportError:
+                logger.warning("ifcopenshell.geom not available - cannot extract storey geometry")
+                return None
+            except Exception as e:
+                logger.warning(f"Error creating storey mesh from IFC: {e}", exc_info=True)
+                return None
+        
         def initializeGL(self):
             """Initialize OpenGL."""
             from OpenGL import GL
@@ -941,7 +2040,7 @@ if PYQT6_AVAILABLE:
                 
                 mvp = projection * view * model
                 
-                # Draw main mesh
+                # Draw main mesh (always show it, even when highlighting)
                 if self.mesh is not None and len(self.mesh.vertices) > 0:
                     if not hasattr(self, '_mesh_drawn_logged'):
                         logger.info(f"=== STEP 7: Drawing main mesh - {len(self.mesh.vertices):,} vertices, {len(self.mesh.faces):,} faces ===")
@@ -999,6 +2098,7 @@ if PYQT6_AVAILABLE:
                 if self.highlighted_window is not None:
                     logger.info("=== STEP 8: Drawing highlighted object ===")
                     # Get object ID (works for both Window objects and IFC elements)
+                    # Use the same ID enhancement logic as highlight_window() to match cached mesh
                     obj_id = None
                     if hasattr(self.highlighted_window, 'GlobalId'):
                         obj_id = self.highlighted_window.GlobalId
@@ -1006,6 +2106,21 @@ if PYQT6_AVAILABLE:
                     elif hasattr(self.highlighted_window, 'id'):
                         obj_id = str(self.highlighted_window.id) if callable(self.highlighted_window.id) else self.highlighted_window.id
                         logger.info(f"✓ STEP 8a: Found id: {obj_id}")
+                    
+                    # Apply same ID enhancement for Window objects (add position hash)
+                    # This must match the logic in highlight_window() to find the cached mesh
+                    try:
+                        from models.building import Window
+                        is_window_object = isinstance(self.highlighted_window, Window)
+                        if is_window_object and obj_id:
+                            # Add position hash to match the enhanced ID used when caching
+                            if hasattr(self.highlighted_window, 'center') and self.highlighted_window.center is not None:
+                                center = self.highlighted_window.center
+                                pos_hash = abs(hash(tuple(round(c, 2) for c in center)))
+                                obj_id = f"{obj_id}_pos{pos_hash}"
+                                logger.info(f"✓ STEP 8a1: Enhanced Window object ID with position hash: {obj_id}")
+                    except ImportError:
+                        pass  # Window class not available, skip enhancement
                     
                     if obj_id is None:
                         logger.error("❌ STEP 8 FAILED: Highlighted object has no identifiable ID")
@@ -1021,6 +2136,20 @@ if PYQT6_AVAILABLE:
                             logger.error(f"❌ STEP 8 FAILED: Mesh has no vertices for {obj_id}")
                         else:
                             logger.info(f"✓ STEP 8b: Found cached mesh for {obj_id}: {len(window_mesh.vertices)} vertices, {len(window_mesh.faces)} faces")
+                            # Validate that window mesh is different from main building mesh
+                            if self.mesh is not None and len(self.mesh.vertices) > 0:
+                                # Check if window mesh is the same as main mesh (shouldn't happen)
+                                if (len(window_mesh.vertices) == len(self.mesh.vertices) and 
+                                    len(window_mesh.faces) == len(self.mesh.faces)):
+                                    # Check if they're actually the same mesh
+                                    window_center = window_mesh.centroid
+                                    main_center = self.mesh.centroid
+                                    if np.allclose(window_center, main_center, atol=0.01):
+                                        logger.error(f"❌ WARNING: Window mesh appears to be the same as main building mesh!")
+                                        logger.error(f"   This means window geometry extraction failed - using building mesh instead")
+                                        logger.error(f"   Window mesh center: {window_center}")
+                                        logger.error(f"   Main mesh center: {main_center}")
+                                        logger.error(f"   This is why all windows highlight the same geometry!")
                         if window_mesh is not None and len(window_mesh.vertices) > 0:
                             # Check if colored shader is available
                             if self.shader_program_colored is None:
@@ -1036,23 +2165,52 @@ if PYQT6_AVAILABLE:
                                         logger.info("✓ STEP 8d: Colored shader bound successfully")
                                         self.shader_program_colored.setUniformValue("mvpMatrix", mvp)
                                         
-                                        # Highlight color: red for spaces, green for doors, blue for windows
+                                        # Highlight color based on element type
                                         if getattr(self, 'highlight_is_space', False):
-                                            color_vec = QVector4D(1.0, 0.0, 0.0, 0.6)  # Red, semi-transparent for spaces
+                                            color_vec = QVector4D(1.0, 0.0, 0.0, 0.6)  # Red for spaces
                                             color_name = "red (space)"
                                         elif getattr(self, 'highlight_is_door', False):
-                                            color_vec = QVector4D(0.0, 1.0, 0.0, 0.6)  # Green, semi-transparent for doors
+                                            color_vec = QVector4D(0.0, 1.0, 0.0, 0.6)  # Green for doors
                                             color_name = "green (door)"
+                                        elif getattr(self, 'highlight_is_window', False):
+                                            color_vec = QVector4D(0.0, 1.0, 1.0, 0.6)  # Cyan for IFC windows
+                                            color_name = "cyan (IFC window)"
+                                        elif getattr(self, 'highlight_is_wall', False):
+                                            color_vec = QVector4D(1.0, 1.0, 0.0, 0.6)  # Yellow for walls
+                                            color_name = "yellow (wall)"
+                                        elif getattr(self, 'highlight_is_slab', False):
+                                            color_vec = QVector4D(1.0, 0.0, 1.0, 0.6)  # Magenta for slabs
+                                            color_name = "magenta (slab)"
+                                        elif getattr(self, 'highlight_is_opening', False):
+                                            color_vec = QVector4D(1.0, 0.0, 1.0, 0.6)  # Purple for openings
+                                            color_name = "purple (opening)"
+                                        elif getattr(self, 'highlight_is_storey', False):
+                                            color_vec = QVector4D(1.0, 0.5, 0.0, 0.6)  # Orange for storeys
+                                            color_name = "orange (storey)"
                                         else:
-                                            color_vec = QVector4D(0.0, 0.5, 1.0, 0.8)  # Blue, semi-transparent for windows
-                                            color_name = "blue (window)"
+                                            color_vec = QVector4D(0.0, 0.8, 1.0, 1.0)  # Bright cyan-blue, fully opaque for Window objects
+                                            color_name = "bright cyan-blue (window object)"
                                         self.shader_program_colored.setUniformValue("color", color_vec)
                                         logger.info(f"✓ STEP 8e: Color set to {color_name}")
+                                        
+                                        # Log window position relative to model for debugging
+                                        if self.mesh is not None and len(self.mesh.vertices) > 0:
+                                            model_bounds = self.mesh.bounds
+                                            window_bounds = window_mesh.bounds
+                                            logger.info(f"✓ STEP 8f1: Model bounds: {model_bounds}")
+                                            logger.info(f"✓ STEP 8f2: Window bounds: {window_bounds}")
+                                            logger.info(f"✓ STEP 8f3: Window center: {window_mesh.centroid}")
+                                            logger.info(f"✓ STEP 8f4: Window extents: {window_mesh.extents}")
                                         
                                         # Enable blending for transparency
                                         GL.glEnable(GL.GL_BLEND)
                                         GL.glBlendFunc(GL.GL_SRC_ALPHA, GL.GL_ONE_MINUS_SRC_ALPHA)
                                         logger.info("✓ STEP 8f: Blending enabled for transparency")
+                                        
+                                        # Disable depth testing for highlights to ensure they're always visible
+                                        # This makes highlights render on top of the model
+                                        GL.glDisable(GL.GL_DEPTH_TEST)
+                                        logger.info("✓ STEP 8f5: Depth testing disabled for highlight visibility")
                                         
                                         # Draw window/door/space mesh
                                         vertices = window_mesh.vertices
@@ -1069,6 +2227,8 @@ if PYQT6_AVAILABLE:
                                         GL.glEnd()
                                         logger.info(f"✓ STEP 8g: Drawn {highlight_triangles // 3:,} triangles for highlighted object")
                                         
+                                        # Re-enable depth testing
+                                        GL.glEnable(GL.GL_DEPTH_TEST)
                                         GL.glDisable(GL.GL_BLEND)
                                         self.shader_program_colored.release()
                                         logger.info("✓ STEP 8h: Highlight rendering complete")
@@ -1466,6 +2626,11 @@ if PYQT6_AVAILABLE:
             """Set building data for window highlighting."""
             if self.opengl_available and hasattr(self.viewer, 'set_building'):
                 self.viewer.set_building(building)
+        
+        def set_ifc_file(self, ifc_file):
+            """Set IFC file reference for extracting actual geometry from IFC elements."""
+            if self.opengl_available and hasattr(self.viewer, 'set_ifc_file'):
+                self.viewer.set_ifc_file(ifc_file)
         
         def highlight_window(self, window):
             """Highlight a specific window or object in the 3D viewer."""

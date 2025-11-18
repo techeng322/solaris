@@ -24,6 +24,14 @@ except ImportError:
     OPEN3D_AVAILABLE = False
     logger.warning("Open3D not available - advanced window detection features disabled. Install with: pip install open3d")
 
+# Try to import pygltflib for GLB material extraction
+try:
+    import pygltflib
+    PYGGLTF_AVAILABLE = True
+except ImportError:
+    PYGGLTF_AVAILABLE = False
+    logger.warning("pygltflib not available - material colors may not be extracted. Install with: pip install pygltflib")
+
 
 class GLBImporter(BaseImporter):
     """
@@ -74,14 +82,28 @@ class GLBImporter(BaseImporter):
                         logger.info(f"  Geometry '{key}': {len(geometry.vertices)} vertices, {len(geometry.faces)} faces")
                 
                 # Create combined mesh for default room (but we'll extract windows from individual geometries)
+                # First, preserve colors from individual geometries if they exist
                 meshes = []
                 for key, geometry in loaded.geometry.items():
                     if isinstance(geometry, trimesh.Trimesh):
+                        # Check if this geometry has colors
+                        if hasattr(geometry, 'visual'):
+                            if hasattr(geometry.visual, 'face_colors') and geometry.visual.face_colors is not None:
+                                if len(geometry.visual.face_colors) > 0:
+                                    logger.info(f"Geometry '{key}' has {len(geometry.visual.face_colors)} face colors")
+                            elif hasattr(geometry.visual, 'vertex_colors') and geometry.visual.vertex_colors is not None:
+                                if len(geometry.visual.vertex_colors) > 0:
+                                    logger.info(f"Geometry '{key}' has {len(geometry.visual.vertex_colors)} vertex colors")
                         meshes.append(geometry)
                 
                 if meshes:
                     self.mesh = trimesh.util.concatenate(meshes)
                     logger.info(f"Combined mesh: {len(self.mesh.vertices):,} vertices, {len(self.mesh.faces):,} faces")
+                    # Check if colors were preserved
+                    if hasattr(self.mesh, 'visual'):
+                        if hasattr(self.mesh.visual, 'face_colors') and self.mesh.visual.face_colors is not None:
+                            if len(self.mesh.visual.face_colors) > 0:
+                                logger.info(f"✓ Colors preserved in combined mesh: {len(self.mesh.visual.face_colors)} face colors")
                 else:
                     raise ValueError("No meshes found in scene")
             elif isinstance(loaded, trimesh.Trimesh):
@@ -92,6 +114,9 @@ class GLBImporter(BaseImporter):
                 raise ValueError(f"Unexpected loaded type: {type(loaded)}")
             
             logger.info(f"MESH LOADED: {len(self.mesh.vertices):,} vertices, {len(self.mesh.faces):,} faces")
+            
+            # Extract and apply colors from GLB materials
+            self._extract_and_apply_colors()
             
         except Exception as e:
             logger.error(f"Failed to load GLB mesh: {e}", exc_info=True)
@@ -1405,6 +1430,170 @@ class GLBImporter(BaseImporter):
                        f"properties={len(metadata['properties'])}")
         
         return metadata
+    
+    def _extract_and_apply_colors(self):
+        """
+        Extract colors from GLB materials and apply them to the mesh.
+        This ensures the mesh displays with proper colors instead of default gray.
+        """
+        if self.mesh is None:
+            return
+        
+        # Check if mesh already has colors
+        has_colors = False
+        if hasattr(self.mesh, 'visual'):
+            if hasattr(self.mesh.visual, 'face_colors') and self.mesh.visual.face_colors is not None:
+                if len(self.mesh.visual.face_colors) > 0:
+                    has_colors = True
+                    logger.info("Mesh already has face colors, keeping them")
+            elif hasattr(self.mesh.visual, 'vertex_colors') and self.mesh.visual.vertex_colors is not None:
+                if len(self.mesh.visual.vertex_colors) > 0:
+                    has_colors = True
+                    logger.info("Mesh already has vertex colors, keeping them")
+        
+        if has_colors:
+            logger.info("Mesh already has colors - skipping material extraction")
+            return
+        
+        # Try to extract colors from GLB materials
+        if not PYGGLTF_AVAILABLE:
+            logger.warning("pygltflib not available - cannot extract material colors")
+            return
+        
+        try:
+            logger.info("Extracting colors from GLB materials...")
+            gltf_data = pygltflib.GLTF2.load(str(self.file_path.resolve()))
+            
+            # Extract material colors
+            material_colors = {}
+            if hasattr(gltf_data, 'materials') and gltf_data.materials:
+                for i, material in enumerate(gltf_data.materials):
+                    color = None
+                    # Try to get base color from PBR material
+                    if hasattr(material, 'pbrMetallicRoughness') and material.pbrMetallicRoughness:
+                        pbr = material.pbrMetallicRoughness
+                        if hasattr(pbr, 'baseColorFactor') and pbr.baseColorFactor:
+                            # baseColorFactor is RGBA [0-1]
+                            color = np.array(pbr.baseColorFactor[:3], dtype=np.float32)
+                    # Try extensions
+                    elif hasattr(material, 'extensions') and material.extensions:
+                        if 'KHR_materials_pbrMetallicRoughness' in material.extensions:
+                            pbr = material.extensions['KHR_materials_pbrMetallicRoughness']
+                            if 'baseColorFactor' in pbr:
+                                color = np.array(pbr['baseColorFactor'][:3], dtype=np.float32)
+                    
+                    if color is not None:
+                        material_colors[i] = color
+                        logger.info(f"Material {i} ({material.name or 'unnamed'}): color = {color}")
+            
+            if not material_colors:
+                logger.warning("No material colors found in GLB file")
+                return
+            
+            # Apply colors to mesh based on material assignments
+            # Map materials to geometries using GLB node/mesh structure
+            if self.scene and isinstance(self.scene, trimesh.Scene):
+                logger.info("Applying colors to scene geometries based on GLB materials...")
+                colors_applied = False
+                
+                # Build mapping: node -> mesh -> material
+                node_mesh_material_map = {}
+                if hasattr(gltf_data, 'nodes') and gltf_data.nodes:
+                    for node_idx, node in enumerate(gltf_data.nodes):
+                        if hasattr(node, 'mesh') and node.mesh is not None:
+                            mesh_idx = node.mesh
+                            # Get material from mesh primitives
+                            if mesh_idx < len(gltf_data.meshes):
+                                gltf_mesh = gltf_data.meshes[mesh_idx]
+                                if hasattr(gltf_mesh, 'primitives') and gltf_mesh.primitives:
+                                    for primitive in gltf_mesh.primitives:
+                                        if hasattr(primitive, 'material') and primitive.material is not None:
+                                            mat_idx = primitive.material
+                                            node_mesh_material_map[node_idx] = (mesh_idx, mat_idx)
+                                            break
+                
+                # Apply colors to geometries based on node names/indices
+                geometry_colors = {}  # Map geometry key to color
+                for node_idx, (mesh_idx, mat_idx) in node_mesh_material_map.items():
+                    if mat_idx in material_colors:
+                        color = material_colors[mat_idx]
+                        # Try to find geometry by node name or index
+                        node_name = None
+                        if node_idx < len(gltf_data.nodes):
+                            node = gltf_data.nodes[node_idx]
+                            if hasattr(node, 'name') and node.name:
+                                node_name = node.name
+                        
+                        # Match geometry by name or create mapping
+                        for geom_key, geometry in self.scene.geometry.items():
+                            if isinstance(geometry, trimesh.Trimesh):
+                                # Match by name or use first available
+                                if node_name and (node_name in str(geom_key) or str(geom_key) in node_name):
+                                    geometry_colors[geom_key] = color
+                                    logger.info(f"Mapped material {mat_idx} (color {color}) to geometry '{geom_key}' (node: {node_name})")
+                                    break
+                        
+                        # If no match found, assign to first unmatched geometry
+                        if node_name is None or node_name not in [str(k) for k in geometry_colors.keys()]:
+                            for geom_key, geometry in self.scene.geometry.items():
+                                if isinstance(geometry, trimesh.Trimesh) and geom_key not in geometry_colors:
+                                    geometry_colors[geom_key] = color
+                                    logger.info(f"Assigned material {mat_idx} (color {color}) to geometry '{geom_key}'")
+                                    break
+                
+                # Apply colors to geometries
+                for geom_key, color in geometry_colors.items():
+                    geometry = self.scene.geometry.get(geom_key)
+                    if isinstance(geometry, trimesh.Trimesh):
+                        if not hasattr(geometry, 'visual'):
+                            geometry.visual = trimesh.visual.ColorVisuals()
+                        
+                        # Convert color to uint8
+                        color_uint8 = (color * 255).astype(np.uint8)
+                        # Apply to all faces
+                        face_count = len(geometry.faces)
+                        face_colors = np.tile(
+                            np.append(color_uint8, 255), 
+                            (face_count, 1)
+                        )
+                        geometry.visual.face_colors = face_colors
+                        colors_applied = True
+                        logger.info(f"✓ Applied color {color} to geometry '{geom_key}' ({face_count} faces)")
+                
+                if colors_applied:
+                    # Re-combine meshes with colors
+                    meshes = []
+                    for key, geometry in self.scene.geometry.items():
+                        if isinstance(geometry, trimesh.Trimesh):
+                            meshes.append(geometry)
+                    
+                    if meshes:
+                        self.mesh = trimesh.util.concatenate(meshes)
+                        logger.info(f"Re-combined mesh with colors: {len(self.mesh.vertices):,} vertices, {len(self.mesh.faces):,} faces")
+                        # Check if colors were preserved
+                        if hasattr(self.mesh, 'visual') and hasattr(self.mesh.visual, 'face_colors'):
+                            if self.mesh.visual.face_colors is not None and len(self.mesh.visual.face_colors) > 0:
+                                logger.info(f"✓ Colors successfully applied to combined mesh: {len(self.mesh.visual.face_colors)} face colors")
+                            else:
+                                logger.warning("⚠ Colors were not preserved when combining meshes")
+                else:
+                    # Fallback: apply first material color to entire mesh
+                    if material_colors:
+                        first_color = list(material_colors.values())[0]
+                        color_uint8 = (first_color * 255).astype(np.uint8)
+                        face_count = len(self.mesh.faces)
+                        face_colors = np.tile(
+                            np.append(color_uint8, 255),
+                            (face_count, 1)
+                        )
+                        if not hasattr(self.mesh, 'visual'):
+                            self.mesh.visual = trimesh.visual.ColorVisuals()
+                        self.mesh.visual.face_colors = face_colors
+                        logger.info(f"Applied fallback color {first_color} to entire mesh")
+            
+        except Exception as e:
+            logger.warning(f"Failed to extract colors from GLB materials: {e}")
+            logger.debug(f"Error details: {e}", exc_info=True)
     
     def _build_node_map(self) -> Dict[int, Dict]:
         """Build a map of node indices to node information."""
