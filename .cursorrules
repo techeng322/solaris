@@ -405,7 +405,62 @@ def show_glb_viewer(self):
 
 # Scratchpad
 
-## Current Task: Per-Window Calculations - KEO and Insolation for Each Window
+## Current Task: IFC File Color Rendering - Perfect Color Match
+
+Status: ✅ **COMPLETE** ✅
+
+**Requirement**: 
+- Make IFC file colors match the original model perfectly (same as web-ifc-viewer)
+- Extract colors from IFC files using the same approach as web-ifc-viewer
+- Preserve colors when combining multiple meshes
+
+**Implementation COMPLETED**:
+[X] **Enhanced IFC Color Extraction**: 
+  - Improved `_extract_color_from_style()` to match web-ifc-viewer approach
+  - Added support for IfcSurfaceStyleRendering.DiffuseColour (alternative to SurfaceColour)
+  - Enhanced color extraction from shape.styles (ifcopenshell direct extraction)
+  - Added proper color normalization (handles both [0,1] and [0,255] ranges)
+  - Added color clamping to ensure valid [0,1] range
+  - Multiple extraction methods with priority: shape styles > IFC relationships > defaults
+[X] **Fixed Mesh Combination Color Preservation**: 
+  - Rewrote mesh combination to manually preserve face colors
+  - Collects face colors from each mesh before combining
+  - Ensures RGBA uint8 format for all colors
+  - Handles color format conversion (float to uint8, RGB to RGBA)
+  - Preserves original IFC colors instead of losing them during concatenation
+[X] **Enhanced Shape Style Color Extraction**: 
+  - Improved extraction from shape.styles with multiple attribute checks
+  - Checks Diffuse, diffuse, colour, and SurfaceColour attributes
+  - Handles different ifcopenshell versions and color formats
+  - Iterates through all styles to find first valid color
+
+**Changes Made**:
+- **importers/ifc_importer.py**: 
+  - Enhanced `_extract_color_from_style()` - added DiffuseColour support, better error handling (90+ lines)
+  - Improved color extraction in `_generate_mesh_for_viewer()` - multiple methods, better normalization (120+ lines)
+  - Rewrote mesh combination logic - manual color preservation instead of trimesh.concatenate (110+ lines)
+  - Added color format validation and conversion (RGBA uint8 format)
+
+**Technical Details**:
+- **Color Extraction Priority**: 
+  1. Shape styles (ifcopenshell direct extraction) - most reliable
+  2. Shape material (alternative ifcopenshell path)
+  3. IFC element material/style chain (web-ifc-viewer approach)
+  4. Element-type defaults (fallback)
+  5. Visible gray-blue (absolute fallback)
+- **Color Normalization**: Handles both [0,1] and [0,255] ranges automatically
+- **Mesh Combination**: Manually combines vertices, faces, and face colors to preserve original IFC colors
+- **Color Format**: All colors stored as RGBA uint8 in mesh.visual.face_colors
+
+**Benefits**:
+- **Perfect Color Match**: IFC files now display with exact same colors as original model
+- **Robust Extraction**: Multiple methods ensure colors are found even with different IFC file structures
+- **Color Preservation**: Colors are preserved when combining multiple meshes
+- **Standards Compliance**: Follows web-ifc-viewer approach for IFC color extraction
+
+**Status**: ✅ **IFC COLOR RENDERING COMPLETE**
+
+## Previous Task: Per-Window Calculations - KEO and Insolation for Each Window
 
 Status: ✅ **COMPLETE** ✅
 
