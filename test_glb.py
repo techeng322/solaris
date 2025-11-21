@@ -31,7 +31,7 @@ try:
     print(f"Successfully imported {len(buildings)} building(s)")
     for building in buildings:
         print(f"  Building: {building.name}")
-        print(f"  Rooms: {building.get_total_rooms()}")
+        print(f"  Windows: {building.get_total_windows()}")
         for room in building.rooms:
             print(f"    - {room.name}: {len(room.windows)} windows, floor {room.floor_number}")
             print(f"      Dimensions: {room.depth:.2f}m x {room.width:.2f}m x {room.height:.2f}m")

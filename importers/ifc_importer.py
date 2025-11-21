@@ -400,7 +400,83 @@ class IFCImporter(BaseImporter):
         except Exception as e:
             logger.warning(f"Error extracting windows from walls: {e}")
         
-        # Method 4: Geometry-based window detection (for elements that look like windows)
+        # Method 4: Material-based window detection (DEEP material analysis)
+        # This is CRITICAL - many windows are identified by their glazing materials
+        logger.info("Performing material-based window detection (deep material analysis)...")
+        try:
+            # Get all building elements that might be windows based on materials
+            potential_window_elements = []
+            
+            # Check all building elements for glazing materials
+            element_types_to_check = [
+                "IfcPlate",  # Glazing panels
+                "IfcMember",  # Window frames
+                "IfcBuildingElementProxy",  # Generic elements
+                "IfcCurtainWall",  # Curtain walls (often have windows)
+                "IfcCurtainWallPanel",  # Curtain wall panels
+                "IfcBuildingElementPart"  # Building element parts
+            ]
+            
+            material_based_windows = []
+            for elem_type in element_types_to_check:
+                try:
+                    elements = self.ifc_file.by_type(elem_type)
+                    logger.info(f"Checking {len(elements)} {elem_type} element(s) for window materials...")
+                    
+                    for elem in elements:
+                        try:
+                            # DEEP material extraction
+                            material_props = self._extract_material_properties(elem)
+                            
+                            # Check if element has glazing/glass materials
+                            has_glazing = False
+                            
+                            # Check primary material
+                            if material_props:
+                                material_name = material_props.get('name', '').lower() if material_props.get('name') else ''
+                                if any(keyword in material_name for keyword in ['glass', 'glazing', 'verre', 'стекло', 'vitrage', 'pane']):
+                                    has_glazing = True
+                                
+                                # Check if material set has glazing
+                                if material_props.get('has_glazing') or material_props.get('is_window_material'):
+                                    has_glazing = True
+                                
+                                # Check constituents for glazing
+                                if 'constituents' in material_props:
+                                    for constituent in material_props['constituents']:
+                                        if constituent.get('is_glazing') or constituent.get('constituent_category', '').lower() == 'glazing':
+                                            has_glazing = True
+                                            break
+                                
+                                # Check layers for glazing
+                                if 'layers' in material_props:
+                                    for layer in material_props['layers']:
+                                        if layer.get('is_glazing'):
+                                            has_glazing = True
+                                            break
+                            
+                            # If element has glazing material, it's likely a window
+                            if has_glazing:
+                                logger.info(f"Found glazing material in {elem_type} {elem.id()} - treating as window")
+                                window = self._extract_window_from_geometry(elem)
+                                if window:
+                                    # Mark as detected by material
+                                    window.properties['detection_method'] = 'material_based'
+                                    window.properties['material'] = material_props
+                                    material_based_windows.append(window)
+                                    logger.info(f"Extracted window from {elem_type} {elem.id()} based on glazing material")
+                        except Exception as e:
+                            logger.debug(f"Error checking {elem_type} {elem.id()} for materials: {e}")
+                except Exception as e:
+                    logger.debug(f"Error getting {elem_type} elements: {e}")
+            
+            if material_based_windows:
+                windows.extend(material_based_windows)
+                logger.info(f"Extracted {len(material_based_windows)} window(s) using material-based detection")
+        except Exception as e:
+            logger.warning(f"Error in material-based window detection: {e}")
+        
+        # Method 5: Geometry-based window detection (for elements that look like windows)
         # This catches windows that aren't properly classified in IFC
         logger.info("Performing geometry-based window detection...")
         try:
@@ -417,12 +493,17 @@ class IFCImporter(BaseImporter):
                     elements = self.ifc_file.by_type(elem_type)
                     for elem in elements:
                         try:
-                            # Check if element looks like a window based on geometry
-                            if self._is_window_like_geometry(elem):
-                                window = self._extract_window_from_geometry(elem)
-                                if window:
-                                    geometry_windows.append(window)
-                                    logger.info(f"Detected window from {elem_type} {elem.id()} using geometry analysis")
+                            # Skip if already detected by material
+                            elem_id = elem.GlobalId if hasattr(elem, 'GlobalId') else str(elem.id())
+                            already_detected = any(w.id.endswith(elem_id) for w in windows)
+                            
+                            if not already_detected:
+                                # Check if element looks like a window based on geometry
+                                if self._is_window_like_geometry(elem):
+                                    window = self._extract_window_from_geometry(elem)
+                                    if window:
+                                        geometry_windows.append(window)
+                                        logger.info(f"Detected window from {elem_type} {elem.id()} using geometry analysis")
                         except Exception as e:
                             logger.debug(f"Error checking {elem_type} {elem.id()} for window geometry: {e}")
                 except Exception as e:
@@ -715,7 +796,7 @@ class IFCImporter(BaseImporter):
                 logger.warning(f"Error extracting properties for window {window_id}: {e}")
                 all_properties = {}
             
-            # Extract material properties (comprehensive extraction)
+            # Extract material properties (DEEP comprehensive extraction)
             try:
                 material_props = self._extract_material_properties(window_elem)
                 if material_props:
@@ -725,11 +806,33 @@ class IFCImporter(BaseImporter):
                     material_type = material_props.get('type', 'Unknown')
                     logger.info(f"Window {window_id}: Found material '{material_name}' (type: {material_type})")
                     
+                    # Log detailed material information
+                    if 'constituents' in material_props:
+                        logger.info(f"Window {window_id}: Material has {len(material_props['constituents'])} constituent(s)")
+                        for i, const in enumerate(material_props['constituents']):
+                            const_name = const.get('name', 'Unknown')
+                            const_category = const.get('constituent_category', '')
+                            is_glazing = const.get('is_glazing', False)
+                            logger.info(f"  Constituent {i+1}: {const_name} (category: {const_category}, glazing: {is_glazing})")
+                    
+                    if 'layers' in material_props:
+                        logger.info(f"Window {window_id}: Material has {len(material_props['layers'])} layer(s)")
+                        for i, layer in enumerate(material_props['layers']):
+                            layer_name = layer.get('name', 'Unknown')
+                            is_glazing = layer.get('is_glazing', False)
+                            logger.info(f"  Layer {i+1}: {layer_name} (glazing: {is_glazing})")
+                    
+                    # Check for glazing materials
+                    if material_props.get('has_glazing') or material_props.get('is_window_material'):
+                        logger.info(f"Window {window_id}: Material contains glazing - confirmed as window")
+                    
                     # If material has color, use it for color extraction
                     if 'color_style' in material_props and 'color' in material_props['color_style']:
                         logger.info(f"Window {window_id}: Material has color information")
                 else:
-                    logger.debug(f"Window {window_id}: No material found")
+                    # No material found - this is common for windows, not necessarily a problem
+                    # Only log at debug level, not warning
+                    logger.debug(f"Window {window_id}: No material properties found (using default/geometry-based detection)")
             except Exception as e:
                 logger.warning(f"Error extracting material properties for window {window_id}: {e}", exc_info=True)
             
@@ -1196,14 +1299,18 @@ class IFCImporter(BaseImporter):
     def _extract_window_geometry(self, window_elem) -> Tuple[Tuple[float, float, float], Tuple[float, float, float], Tuple[float, float]]:
         """
         Extract window center, normal, and size from IFC element.
-        Uses properties first, then lightweight geometry extraction if needed.
+        Uses multiple methods to ensure dimensions are ALWAYS extracted:
+        1. Properties (fastest)
+        2. Geometry extraction (if properties missing)
+        3. Type definition properties (fallback)
+        4. Reasonable defaults (last resort)
         """
         # Try to extract from properties first (fastest)
         properties = self._extract_properties(window_elem)
         
         # Extract size from properties (try multiple property names)
-        width = properties.get('OverallWidth') or properties.get('Width') or properties.get('NominalWidth')
-        height = properties.get('OverallHeight') or properties.get('Height') or properties.get('NominalHeight')
+        width = properties.get('OverallWidth') or properties.get('Width') or properties.get('NominalWidth') or properties.get('FrameWidth')
+        height = properties.get('OverallHeight') or properties.get('Height') or properties.get('NominalHeight') or properties.get('FrameHeight')
         
         # Try to convert to float if they're strings
         try:
@@ -1218,26 +1325,92 @@ class IFCImporter(BaseImporter):
         except (ValueError, TypeError):
             height = None
         
-        # If properties don't have size, try geometry extraction
-        if width is None or height is None or width <= 0 or height <= 0:
-            logger.debug(f"Window size not found in properties, trying geometry extraction")
-            if not self.lightweight:
-                try:
-                    geom_center, geom_normal, geom_size = self._extract_geometry_from_ifc(window_elem)
-                    if geom_size[0] > 0 and geom_size[1] > 0:
-                        logger.debug(f"Using geometry-extracted size: {geom_size}")
-                        # Use geometry-extracted values
-                        return geom_center, geom_normal, geom_size
-                except Exception as e:
-                    logger.debug(f"Geometry extraction failed: {e}")
-            else:
-                logger.debug("Lightweight mode: skipping geometry extraction")
+        # Method 2: Try to get dimensions from window type if available
+        if (width is None or height is None or width <= 0 or height <= 0) and hasattr(window_elem, 'IsTypedBy') and window_elem.IsTypedBy:
+            try:
+                for type_rel in window_elem.IsTypedBy:
+                    if hasattr(type_rel, 'RelatingType') and type_rel.RelatingType:
+                        window_type = type_rel.RelatingType
+                        type_properties = self._extract_properties(window_type)
+                        if not width or width <= 0:
+                            width = type_properties.get('OverallWidth') or type_properties.get('Width') or type_properties.get('NominalWidth')
+                            if width:
+                                try:
+                                    width = float(width)
+                                except (ValueError, TypeError):
+                                    width = None
+                        if not height or height <= 0:
+                            height = type_properties.get('OverallHeight') or type_properties.get('Height') or type_properties.get('NominalHeight')
+                            if height:
+                                try:
+                                    height = float(height)
+                                except (ValueError, TypeError):
+                                    height = None
+                        if width and width > 0 and height and height > 0:
+                            logger.debug(f"Extracted window dimensions from window type: {width}x{height}")
+                            break
+            except Exception as e:
+                logger.debug(f"Error extracting dimensions from window type: {e}")
         
-        # Use properties or defaults
-        width = float(width) if width and width > 0 else 1.5
-        height = float(height) if height and height > 0 else 1.2
+        # Method 3: If properties don't have size, try geometry extraction (ALWAYS try for windows, even in lightweight mode)
+        # Windows need dimensions for calculations, so we always extract geometry if properties are missing
+        if width is None or height is None or width <= 0 or height <= 0:
+            logger.info(f"Window dimensions not found in properties for {window_elem.id()}, extracting from geometry...")
+            try:
+                geom_center, geom_normal, geom_size = self._extract_geometry_from_ifc(window_elem)
+                if geom_size[0] > 0 and geom_size[1] > 0:
+                    logger.info(f"✓ Successfully extracted window dimensions from geometry: {geom_size[0]:.2f}m x {geom_size[1]:.2f}m")
+                    # Use geometry-extracted values
+                    return geom_center, geom_normal, geom_size
+                else:
+                    logger.warning(f"Geometry extraction returned invalid size: {geom_size}")
+            except Exception as e:
+                logger.warning(f"Geometry extraction failed for window {window_elem.id()}: {e}")
+                logger.info("Will use estimated dimensions based on window type or defaults")
+        
+        # Method 4: Use properties or reasonable defaults based on window type
+        if width is None or width <= 0:
+            # Try to estimate from window type or use reasonable default
+            window_type_name = ""
+            if hasattr(window_elem, 'IsTypedBy') and window_elem.IsTypedBy:
+                try:
+                    type_rel = window_elem.IsTypedBy[0]
+                    if hasattr(type_rel, 'RelatingType') and hasattr(type_rel.RelatingType, 'Name'):
+                        window_type_name = type_rel.RelatingType.Name.lower() if type_rel.RelatingType.Name else ""
+                except:
+                    pass
+            
+            # Estimate width based on window type
+            if 'large' in window_type_name or 'wide' in window_type_name:
+                width = 2.0
+            elif 'small' in window_type_name or 'narrow' in window_type_name:
+                width = 0.8
+            else:
+                width = 1.5  # Standard window width
+        
+        if height is None or height <= 0:
+            # Try to estimate from window type or use reasonable default
+            window_type_name = ""
+            if hasattr(window_elem, 'IsTypedBy') and window_elem.IsTypedBy:
+                try:
+                    type_rel = window_elem.IsTypedBy[0]
+                    if hasattr(type_rel, 'RelatingType') and hasattr(type_rel.RelatingType, 'Name'):
+                        window_type_name = type_rel.RelatingType.Name.lower() if type_rel.RelatingType.Name else ""
+                except:
+                    pass
+            
+            # Estimate height based on window type
+            if 'tall' in window_type_name or 'high' in window_type_name:
+                height = 2.0
+            elif 'short' in window_type_name or 'low' in window_type_name:
+                height = 0.8
+            else:
+                height = 1.2  # Standard window height
+        
+        width = float(width)
+        height = float(height)
         size = (width, height)
-        logger.debug(f"Using size from properties/defaults: {size}")
+        logger.debug(f"Using size from properties/type/geometry/defaults: {size}")
         
         # Extract position from properties or placement
         center = self._extract_window_position(window_elem, properties)
@@ -1374,13 +1547,58 @@ class IFCImporter(BaseImporter):
             shape = geom.create_shape(settings, element)
             geometry = shape.geometry
             
-            # Get bounding box
-            bbox = geometry.bbox
-            if bbox is None or len(bbox) < 2:
-                raise ValueError("Invalid bounding box")
-            
-            min_bounds = bbox[0]
-            max_bounds = bbox[1]
+            # Get bounding box - Triangulation objects don't have bbox attribute
+            # Calculate from vertices instead
+            if hasattr(geometry, 'bbox') and geometry.bbox is not None:
+                # Some geometry types have bbox attribute
+                bbox = geometry.bbox
+                if len(bbox) >= 2:
+                    min_bounds = bbox[0]
+                    max_bounds = bbox[1]
+                else:
+                    raise ValueError("Invalid bounding box")
+            elif hasattr(geometry, 'verts') and geometry.verts:
+                # Calculate bbox from vertices (for Triangulation objects)
+                verts = geometry.verts
+                if not verts or len(verts) == 0:
+                    raise ValueError("No vertices in geometry")
+                
+                # Convert to numpy array for efficient calculation
+                try:
+                    vertices = np.array(verts, dtype=np.float64)
+                    if len(vertices.shape) == 1:
+                        if len(vertices) % 3 == 0:
+                            vertices = vertices.reshape(-1, 3)
+                        else:
+                            raise ValueError("Invalid vertex count")
+                    elif len(vertices.shape) == 2 and vertices.shape[1] != 3:
+                        raise ValueError("Invalid vertex shape")
+                    
+                    if len(vertices) < 3:
+                        raise ValueError("Not enough vertices")
+                    
+                    # Calculate bounding box
+                    min_bounds = np.min(vertices, axis=0)
+                    max_bounds = np.max(vertices, axis=0)
+                    min_bounds = tuple(min_bounds)
+                    max_bounds = tuple(max_bounds)
+                except Exception as e:
+                    logger.debug(f"Error processing vertices for bbox: {e}")
+                    # Fallback: manual calculation
+                    if isinstance(verts, (list, tuple)) and len(verts) >= 3:
+                        x_coords = [v[0] if isinstance(v, (list, tuple, np.ndarray)) and len(v) > 0 else (verts[i] if i < len(verts) else 0) for i, v in enumerate(verts[::3])]
+                        y_coords = [v[1] if isinstance(v, (list, tuple, np.ndarray)) and len(v) > 1 else (verts[i+1] if i+1 < len(verts) else 0) for i, v in enumerate(verts[1::3])]
+                        z_coords = [v[2] if isinstance(v, (list, tuple, np.ndarray)) and len(v) > 2 else (verts[i+2] if i+2 < len(verts) else 0) for i, v in enumerate(verts[2::3])]
+                        
+                        if x_coords and y_coords and z_coords:
+                            min_bounds = (min(x_coords), min(y_coords), min(z_coords))
+                            max_bounds = (max(x_coords), max(y_coords), max(z_coords))
+                        else:
+                            raise ValueError("Could not extract coordinates from vertices")
+                    else:
+                        raise ValueError("Invalid vertex format")
+            else:
+                raise ValueError("Geometry has no bbox or verts attribute")
             
             # Calculate center
             center = (
@@ -1454,11 +1672,34 @@ class IFCImporter(BaseImporter):
                 settings = geom.settings()
                 shape = geom.create_shape(settings, space_elem)
                 geometry = shape.geometry
-                bbox = geometry.bbox
                 
-                depth = abs(bbox[1][0] - bbox[0][0])
-                width = abs(bbox[1][1] - bbox[0][1])
-                height = abs(bbox[1][2] - bbox[0][2])
+                # Get bounding box - handle Triangulation objects
+                if hasattr(geometry, 'bbox') and geometry.bbox is not None and len(geometry.bbox) >= 2:
+                    bbox = geometry.bbox
+                    min_bounds = bbox[0]
+                    max_bounds = bbox[1]
+                elif hasattr(geometry, 'verts') and geometry.verts:
+                    # Calculate from vertices
+                    verts = geometry.verts
+                    try:
+                        vertices = np.array(verts, dtype=np.float64)
+                        if len(vertices.shape) == 1 and len(vertices) % 3 == 0:
+                            vertices = vertices.reshape(-1, 3)
+                        if len(vertices.shape) == 2 and vertices.shape[1] == 3:
+                            min_bounds = np.min(vertices, axis=0)
+                            max_bounds = np.max(vertices, axis=0)
+                            min_bounds = tuple(min_bounds)
+                            max_bounds = tuple(max_bounds)
+                        else:
+                            raise ValueError("Invalid vertex format")
+                    except Exception:
+                        raise ValueError("Could not process vertices")
+                else:
+                    raise ValueError("No bbox or verts in geometry")
+                
+                depth = abs(max_bounds[0] - min_bounds[0])
+                width = abs(max_bounds[1] - min_bounds[1])
+                height = abs(max_bounds[2] - min_bounds[2])
                 
                 if depth > 0 and width > 0 and height > 0:
                     return (float(depth), float(width), float(height))
@@ -1577,26 +1818,26 @@ class IFCImporter(BaseImporter):
                                                 logger.debug(f"Found material for window {element.id()} via window type")
             
             # Method 3: Check for material constituent sets (different materials for different parts)
+            # This is CRITICAL for windows - they often have frame + glazing materials
             if hasattr(element, 'HasAssociations'):
                 for assoc in element.HasAssociations:
                     if assoc.is_a("IfcRelAssociatesMaterial"):
                         material_select = assoc.RelatingMaterial
                         if material_select.is_a("IfcMaterialConstituentSet"):
-                            # Material constituent set - different materials for different parts
-                            constituents = []
-                            if hasattr(material_select, 'MaterialConstituents'):
-                                for constituent in material_select.MaterialConstituents:
-                                    if hasattr(constituent, 'Material') and constituent.Material:
-                                        mat = constituent.Material
-                                        mat_info = {
-                                            'name': mat.Name if hasattr(mat, 'Name') else None,
-                                            'category': constituent.Category if hasattr(constituent, 'Category') else None
-                                        }
-                                        constituents.append(mat_info)
-                            if constituents:
-                                material_props['constituents'] = constituents
+                            # Use deep extraction method which handles constituents properly
+                            constituent_info = self._extract_single_material(material_select)
+                            if constituent_info:
+                                # Merge into material_props
+                                if 'constituents' in constituent_info:
+                                    material_props['constituents'] = constituent_info['constituents']
+                                if 'has_glazing' in constituent_info:
+                                    material_props['has_glazing'] = constituent_info['has_glazing']
+                                if 'is_window_material' in constituent_info:
+                                    material_props['is_window_material'] = constituent_info['is_window_material']
                                 material_props['type'] = 'IfcMaterialConstituentSet'
                                 logger.debug(f"Found material constituent set for element {element.id()}")
+                                if material_props.get('has_glazing'):
+                                    logger.info(f"Element {element.id()} has glazing material - likely a window")
             
             # Store all materials if multiple found
             if len(all_materials) > 1:
@@ -1610,13 +1851,14 @@ class IFCImporter(BaseImporter):
     
     def _extract_single_material(self, material_select) -> Dict:
         """
-        Extract properties from a single material entity.
+        Extract properties from a single material entity with DEEP extraction.
+        Extracts all material properties, including nested properties and constituent sets.
         
         Args:
             material_select: IFC material entity (IfcMaterial, IfcMaterialList, etc.)
         
         Returns:
-            Dictionary with material properties
+            Dictionary with comprehensive material properties
         """
         material_props = {}
         
@@ -1627,14 +1869,63 @@ class IFCImporter(BaseImporter):
                 material_props['name'] = material.Name if hasattr(material, 'Name') else None
                 material_props['type'] = 'IfcMaterial'
                 
-                # Get material properties
+                # DEEP extraction: Get ALL material properties (not just basic ones)
                 if hasattr(material, 'HasProperties'):
+                    material_props['properties'] = {}
                     for prop in material.HasProperties:
-                        if hasattr(prop, 'Name') and hasattr(prop, 'NominalValue'):
+                        if hasattr(prop, 'Name'):
                             prop_name = prop.Name
-                            prop_value = prop.NominalValue
-                            if prop_value and hasattr(prop_value, 'wrappedValue'):
-                                material_props[prop_name] = prop_value.wrappedValue
+                            
+                            # Handle different property types comprehensively
+                            if prop.is_a("IfcPropertySingleValue"):
+                                if hasattr(prop, 'NominalValue') and prop.NominalValue:
+                                    prop_value = prop.NominalValue
+                                    if hasattr(prop_value, 'wrappedValue'):
+                                        material_props['properties'][prop_name] = prop_value.wrappedValue
+                                    else:
+                                        material_props['properties'][prop_name] = prop_value
+                            
+                            elif prop.is_a("IfcPropertyBoundedValue"):
+                                bounded = {}
+                                if hasattr(prop, 'UpperBoundValue') and prop.UpperBoundValue:
+                                    if hasattr(prop.UpperBoundValue, 'wrappedValue'):
+                                        bounded['max'] = prop.UpperBoundValue.wrappedValue
+                                    else:
+                                        bounded['max'] = prop.UpperBoundValue
+                                if hasattr(prop, 'LowerBoundValue') and prop.LowerBoundValue:
+                                    if hasattr(prop.LowerBoundValue, 'wrappedValue'):
+                                        bounded['min'] = prop.LowerBoundValue.wrappedValue
+                                    else:
+                                        bounded['min'] = prop.LowerBoundValue
+                                if bounded:
+                                    material_props['properties'][prop_name] = bounded
+                            
+                            elif prop.is_a("IfcPropertyListValue"):
+                                if hasattr(prop, 'ListValues') and prop.ListValues:
+                                    list_values = []
+                                    for val in prop.ListValues:
+                                        if hasattr(val, 'wrappedValue'):
+                                            list_values.append(val.wrappedValue)
+                                        else:
+                                            list_values.append(val)
+                                    material_props['properties'][prop_name] = list_values
+                            
+                            # Store property directly for backward compatibility
+                            if prop_name not in material_props:
+                                if hasattr(prop, 'NominalValue') and prop.NominalValue:
+                                    prop_value = prop.NominalValue
+                                    if hasattr(prop_value, 'wrappedValue'):
+                                        material_props[prop_name] = prop_value.wrappedValue
+                                    else:
+                                        material_props[prop_name] = prop_value
+                
+                # Check for material category (important for identifying window materials)
+                if hasattr(material, 'Category'):
+                    material_props['category'] = material.Category
+                
+                # Check for material description
+                if hasattr(material, 'Description'):
+                    material_props['description'] = material.Description
             
             elif material_select.is_a("IfcMaterialList"):
                 # List of materials
@@ -1657,7 +1948,7 @@ class IFCImporter(BaseImporter):
                 material_props['type'] = 'IfcMaterialList'
             
             elif material_select.is_a("IfcMaterialLayerSet"):
-                # Layered material
+                # Layered material - different materials for different layers
                 layers = []
                 for layer in material_select.MaterialLayers:
                     layer_info = {}
@@ -1665,15 +1956,26 @@ class IFCImporter(BaseImporter):
                         mat = layer.Material
                         if hasattr(mat, 'Name'):
                             layer_info['name'] = mat.Name
-                        # Extract properties from layer material
+                        # DEEP extraction: Extract ALL properties from layer material
                         if hasattr(mat, 'HasProperties'):
                             layer_info['properties'] = {}
                             for prop in mat.HasProperties:
-                                if hasattr(prop, 'Name') and hasattr(prop, 'NominalValue'):
+                                if hasattr(prop, 'Name'):
                                     prop_name = prop.Name
-                                    prop_value = prop.NominalValue
-                                    if prop_value and hasattr(prop_value, 'wrappedValue'):
-                                        layer_info['properties'][prop_name] = prop_value.wrappedValue
+                                    if prop.is_a("IfcPropertySingleValue"):
+                                        if hasattr(prop, 'NominalValue') and prop.NominalValue:
+                                            prop_value = prop.NominalValue
+                                            if hasattr(prop_value, 'wrappedValue'):
+                                                layer_info['properties'][prop_name] = prop_value.wrappedValue
+                                            else:
+                                                layer_info['properties'][prop_name] = prop_value
+                        
+                        # Check if layer is glazing (critical for window detection)
+                        mat_name = layer_info.get('name', '').lower() if layer_info.get('name') else ''
+                        if any(keyword in mat_name for keyword in ['glass', 'glazing', 'verre', 'стекло', 'vitrage', 'pane']):
+                            layer_info['is_glazing'] = True
+                            material_props['has_glazing'] = True
+                            material_props['is_window_material'] = True
                     if hasattr(layer, 'LayerThickness'):
                         layer_info['thickness'] = float(layer.LayerThickness)
                     if hasattr(layer, 'Category'):
@@ -1681,6 +1983,10 @@ class IFCImporter(BaseImporter):
                     layers.append(layer_info)
                 material_props['layers'] = layers
                 material_props['type'] = 'IfcMaterialLayerSet'
+                
+                # If material set has glazing, this is likely a window
+                if material_props.get('has_glazing'):
+                    logger.debug(f"Material layer set has glazing - likely window material")
             
             elif material_select.is_a("IfcMaterialProfileSet"):
                 # Profile-based material (for frames, etc.)
@@ -2386,10 +2692,11 @@ class IFCImporter(BaseImporter):
             meshes = []
             
             # Get all building elements that have geometry
-            # Note: Process windows FIRST to ensure they get proper color extraction
+            # Note: Process windows FIRST to ensure they get proper color extraction and transparency
             element_types = [
                 "IfcWindow",  # Process windows first for better color extraction
-                "IfcOpeningElement",  # Openings often contain windows
+                "IfcOpeningElement",  # Openings often contain windows (process early for transparency)
+                "IfcPlate",  # Glazing panels (process early for transparency)
                 "IfcWall",
                 "IfcWallStandardCase",
                 "IfcSlab",  # Floors/ceilings
@@ -2731,20 +3038,101 @@ class IFCImporter(BaseImporter):
                                                     # Get transparency (0.0 = opaque, 1.0 = fully transparent)
                                                     transparency = color_style.get('transparency', 0.0)
                                                     
-                                                    # For windows, check material for transparency/glass properties
-                                                    if element_type == "IfcWindow" or element.is_a("IfcPlate"):
-                                                        # Check material properties for glass/transparent indication
+                                                    # For windows, ALWAYS apply transparency (windows should be transparent)
+                                                    is_window = False
+                                                    
+                                                    # Check if element is a window (comprehensive detection)
+                                                    if element_type == "IfcWindow":
+                                                        is_window = True
+                                                    elif element.is_a("IfcPlate"):
+                                                        # Check if plate is a glazing panel (window)
+                                                        # Method 1: Check material for glazing
+                                                        try:
+                                                            material_props = self._extract_material_properties(element)
+                                                            if material_props:
+                                                                if material_props.get('has_glazing') or material_props.get('is_window_material'):
+                                                                    is_window = True
+                                                                else:
+                                                                    material_name = material_props.get('name', '').lower() if material_props.get('name') else ''
+                                                                    if any(keyword in material_name for keyword in ['glass', 'glazing', 'verre', 'стекло', 'vitrage', 'pane']):
+                                                                        is_window = True
+                                                        except:
+                                                            pass
+                                                        
+                                                        # Method 2: Check name for window keywords
+                                                        if not is_window:
+                                                            plate_name = element.Name if hasattr(element, 'Name') else ''
+                                                            if plate_name:
+                                                                name_lower = plate_name.lower()
+                                                                if any(keyword in name_lower for keyword in ['window', 'окно', 'glazing', 'glass', 'pane', 'vitrage']):
+                                                                    is_window = True
+                                                        
+                                                        # Method 3: Check if plate has window-like geometry
+                                                        if not is_window:
+                                                            try:
+                                                                center, normal, size = self._extract_window_geometry(element)
+                                                                width, height = size
+                                                                # Windows are typically 0.3m - 3m in size
+                                                                if 0.3 <= width <= 3.0 and 0.3 <= height <= 3.0:
+                                                                    is_window = True
+                                                            except:
+                                                                pass
+                                                        
+                                                        # Default: If plate is in reasonable window size range, treat as window
+                                                        if not is_window:
+                                                            is_window = True  # AGGRESSIVE: Treat all plates as potential windows
+                                                            logger.debug(f"Treating IfcPlate {element.id()} as window (aggressive detection)")
+                                                    
+                                                    elif element.is_a("IfcOpeningElement"):
+                                                        # Check if opening is a window (not a door)
+                                                        # Method 1: Check if filled by door
+                                                        is_door = False
+                                                        if hasattr(element, 'HasFillings'):
+                                                            for filling_rel in element.HasFillings:
+                                                                if hasattr(filling_rel, 'RelatedBuildingElement'):
+                                                                    if filling_rel.RelatedBuildingElement.is_a("IfcDoor"):
+                                                                        is_door = True
+                                                                        break
+                                                        
+                                                        # Method 2: Check name
+                                                        if not is_door:
+                                                            opening_name = element.Name if hasattr(element, 'Name') else ''
+                                                            if opening_name:
+                                                                name_lower = opening_name.lower()
+                                                                if any(keyword in name_lower for keyword in ['door', 'дверь', 'porte', 'tür', 'entrance']):
+                                                                    is_door = True
+                                                        
+                                                        # If not a door, it's likely a window
+                                                        if not is_door:
+                                                            is_window = True
+                                                            logger.debug(f"Treating IfcOpeningElement {element.id()} as window")
+                                                    
+                                                    # Apply transparency to windows
+                                                    if is_window:
+                                                        # Check material for glass/glazing to determine transparency level
                                                         try:
                                                             material_props = self._extract_material_properties(element)
                                                             if material_props:
                                                                 material_name = material_props.get('name', '').lower() if material_props.get('name') else ''
-                                                                # If material is glass/glazing, make it semi-transparent
-                                                                if any(keyword in material_name for keyword in ['glass', 'glazing', 'verre', 'стекло', 'vitrage']):
-                                                                    # Windows should be semi-transparent (alpha ~0.7-0.9)
-                                                                    transparency = 0.2  # 20% transparent = 80% opaque
-                                                                    logger.debug(f"Applied transparency to {element_type} {element.id()} (glass material)")
-                                                        except:
-                                                            pass
+                                                                has_glazing = material_props.get('has_glazing', False)
+                                                                
+                                                                # If material is glass/glazing, make it more transparent
+                                                                if has_glazing or any(keyword in material_name for keyword in ['glass', 'glazing', 'verre', 'стекло', 'vitrage']):
+                                                                    # Glass windows: 30-40% transparent (60-70% opaque)
+                                                                    transparency = 0.3
+                                                                    logger.debug(f"Applied high transparency to {element_type} {element.id()} (glass/glazing material)")
+                                                                else:
+                                                                    # Regular windows: 20% transparent (80% opaque)
+                                                                    transparency = 0.2
+                                                                    logger.debug(f"Applied transparency to {element_type} {element.id()} (window element)")
+                                                            else:
+                                                                # No material found, but it's a window - apply default transparency
+                                                                transparency = 0.25  # 25% transparent = 75% opaque
+                                                                logger.debug(f"Applied default transparency to {element_type} {element.id()} (window, no material)")
+                                                        except Exception as e:
+                                                            # Fallback: apply default transparency for windows
+                                                            transparency = 0.25
+                                                            logger.debug(f"Applied default transparency to {element_type} {element.id()} (window, error checking material: {e})")
                                                     
                                                     alpha = 1.0 - transparency  # Convert to alpha (1.0 = opaque)
                                                     
@@ -2765,24 +3153,63 @@ class IFCImporter(BaseImporter):
                                                     logger.debug(f"✓ Applied color to {element_type} {element.id()}: RGB({r*255:.0f}, {g*255:.0f}, {b*255:.0f}), alpha={alpha:.2f}")
                                                 else:
                                                     # No color found - use default light gray
-                                                    default_color = np.array([200, 200, 200, 255], dtype=np.uint8)
+                                                    # BUT: For windows, apply transparency even with default color
+                                                    is_window = False
+                                                    window_alpha = 255  # Default opaque
+                                                    
+                                                    # Check if element is a window
+                                                    if element_type == "IfcWindow":
+                                                        is_window = True
+                                                    elif element.is_a("IfcPlate"):
+                                                        # Check if plate is a glazing panel
+                                                        try:
+                                                            material_props = self._extract_material_properties(element)
+                                                            if material_props and (material_props.get('has_glazing') or material_props.get('is_window_material')):
+                                                                is_window = True
+                                                        except:
+                                                            pass
+                                                    elif element.is_a("IfcOpeningElement"):
+                                                        # Check if opening is a window (not a door)
+                                                        opening_name = element.Name if hasattr(element, 'Name') else ''
+                                                        if opening_name:
+                                                            name_lower = opening_name.lower()
+                                                            if not any(keyword in name_lower for keyword in ['door', 'дверь', 'porte', 'tür']):
+                                                                is_window = True
+                                                        else:
+                                                            is_window = True
+                                                    
+                                                    # Apply transparency to windows even with default color
+                                                    if is_window:
+                                                        # Windows should be semi-transparent (75% opaque = 25% transparent)
+                                                        window_alpha = int(255 * 0.75)  # 75% opacity
+                                                        logger.debug(f"Applied transparency to {element_type} {element.id()} (window with default color)")
+                                                    
+                                                    default_color = np.array([200, 200, 200, window_alpha], dtype=np.uint8)
                                                     num_faces = len(mesh.faces)
                                                     face_colors = np.tile(default_color, (num_faces, 1))
                                                     mesh.visual.face_colors = face_colors
+                                                    
                                                     # Log which element is missing color for debugging
                                                     element_name = getattr(element, 'Name', 'Unnamed')
                                                     element_id = getattr(element, 'GlobalId', element.id())
-                                                    if element_type == "IfcWindow":
-                                                        logger.info(f"⚠ Window '{element_name}' (ID: {element_id}) has no color - tried all extraction methods")
+                                                    if element_type == "IfcWindow" or is_window:
+                                                        logger.info(f"⚠ Window '{element_name}' (ID: {element_id}) has no color but transparency applied")
                                                     else:
                                                         logger.debug(f"⚠ No color found for {element_type} '{element_name}' (ID: {element_id}), using default gray")
                                             except Exception as color_error:
                                                 logger.warning(f"Error applying color to {element_type} {element.id()}: {color_error}")
                                                 # Use default gray if color extraction fails
-                                                default_color = np.array([200, 200, 200, 255], dtype=np.uint8)
+                                                # BUT: For windows, apply transparency even on error
+                                                is_window = (element_type == "IfcWindow" or 
+                                                           element.is_a("IfcPlate") or 
+                                                           element.is_a("IfcOpeningElement"))
+                                                window_alpha = int(255 * 0.75) if is_window else 255  # 75% opacity for windows
+                                                default_color = np.array([200, 200, 200, window_alpha], dtype=np.uint8)
                                                 num_faces = len(mesh.faces)
                                                 face_colors = np.tile(default_color, (num_faces, 1))
                                                 mesh.visual.face_colors = face_colors
+                                                if is_window:
+                                                    logger.debug(f"Applied transparency to {element_type} {element.id()} (window, color extraction error)")
                                             
                                             meshes.append(mesh)
                                             successful_elements += 1

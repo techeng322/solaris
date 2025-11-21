@@ -957,14 +957,29 @@ if PYQT6_AVAILABLE:
                 QMessageBox.warning(self, t.WARNING, t.NO_RESULTS)
                 return
             
-            file_path, _ = QFileDialog.getSaveFileName(
+            file_path, selected_filter = QFileDialog.getSaveFileName(
                 self,
                 t.EXPORT_REPORT,
                 "report.pdf",
-                "PDF Files (*.pdf);;HTML Files (*.html)"
+                "PDF Files (*.pdf);;HTML Files (*.html);;DOCX Files (*.docx)"
             )
             
             if file_path:
+                # Ensure file has correct extension based on selected filter
+                from pathlib import Path
+                file_path_obj = Path(file_path)
+                if not file_path_obj.suffix:
+                    # No extension - add based on filter
+                    if 'PDF' in selected_filter:
+                        file_path = str(file_path_obj.with_suffix('.pdf'))
+                    elif 'HTML' in selected_filter:
+                        file_path = str(file_path_obj.with_suffix('.html'))
+                    elif 'DOCX' in selected_filter:
+                        file_path = str(file_path_obj.with_suffix('.docx'))
+                    else:
+                        # Default to PDF
+                        file_path = str(file_path_obj.with_suffix('.pdf'))
+                
                 try:
                     from reports import ReportGenerator
                     report_gen = ReportGenerator()
