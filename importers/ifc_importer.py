@@ -2693,6 +2693,7 @@ class IFCImporter(BaseImporter):
             
             # Get all building elements that have geometry
             # Note: Process windows FIRST to ensure they get proper color extraction and transparency
+            # CRITICAL: Also process ALL other element types to ensure complete visualization
             element_types = [
                 "IfcWindow",  # Process windows first for better color extraction
                 "IfcOpeningElement",  # Openings often contain windows (process early for transparency)
@@ -2704,8 +2705,25 @@ class IFCImporter(BaseImporter):
                 "IfcSpace",  # Rooms
                 "IfcColumn",
                 "IfcBeam",
-                "IfcDoor"
+                "IfcDoor",
+                "IfcStair",  # Stairs
+                "IfcRailing",  # Railings
+                "IfcCurtainWall",  # Curtain walls
+                "IfcBuildingElementProxy",  # Generic building elements
+                "IfcMember",  # Structural members
+                "IfcCovering",  # Coverings (flooring, cladding, etc.)
+                "IfcFooting",  # Foundations
+                "IfcPile",  # Piles
+                "IfcChimney",  # Chimneys
+                "IfcBuildingElementPart",  # Building element parts
+                "IfcDiscreteAccessory",  # Accessories
+                "IfcFastener",  # Fasteners
+                "IfcMechanicalFastener",  # Mechanical fasteners
             ]
+            
+            # ALSO: Process ALL other elements that might have geometry
+            # This ensures we don't miss any geometry
+            logger.info("Processing all IFC element types for complete visualization...")
             
             settings = geom.settings()
             # Use world coordinates
@@ -2738,17 +2756,29 @@ class IFCImporter(BaseImporter):
                 try:
                     elements = self.ifc_file.by_type(element_type)
                     total_elements += len(elements)
+                    if len(elements) > 0:
+                        logger.debug(f"Processing {len(elements)} {element_type} element(s)...")
                     
                     for element in elements:
                         try:
                             # Create shape from element
-                            shape = geom.create_shape(settings, element)
-                            if not shape:
+                            try:
+                                shape = geom.create_shape(settings, element)
+                                if not shape:
+                                    logger.debug(f"Could not create shape for {element_type} {element.id()}")
+                                    continue
+                            except Exception as shape_error:
+                                logger.debug(f"Error creating shape for {element_type} {element.id()}: {shape_error}")
                                 continue
                             
                             # Get geometry from shape
-                            geometry = shape.geometry
-                            if not geometry:
+                            try:
+                                geometry = shape.geometry
+                                if not geometry:
+                                    logger.debug(f"No geometry in shape for {element_type} {element.id()}")
+                                    continue
+                            except Exception as geom_error:
+                                logger.debug(f"Error accessing geometry for {element_type} {element.id()}: {geom_error}")
                                 continue
                             
                             # Convert ifcopenshell geometry to trimesh
@@ -2757,9 +2787,25 @@ class IFCImporter(BaseImporter):
                                 vertices = None
                                 faces = None
                                 
-                                # Primary method: Direct access to geometry.verts and geometry.faces
+                                # Primary method: Use ifcopenshell tessellation (most reliable)
+                                # This is the recommended way to extract geometry
+                                try:
+                                    # Try tessellation method first (most reliable)
+                                    if hasattr(geometry, 'tessellation'):
+                                        tess = geometry.tessellation()
+                                        if tess and isinstance(tess, tuple) and len(tess) >= 2:
+                                            vertices = np.array(tess[0], dtype=np.float64)
+                                            faces_data = tess[1]
+                                            faces = np.array(faces_data, dtype=np.int32)
+                                            if len(faces.shape) == 1 and len(faces) % 3 == 0:
+                                                faces = faces.reshape(-1, 3)
+                                            logger.debug(f"Extracted geometry using tessellation() for {element_type} {element.id()}")
+                                except Exception as tess_error:
+                                    logger.debug(f"Tessellation method failed: {tess_error}")
+                                
+                                # Method 1b: Direct access to geometry.verts and geometry.faces
                                 # This is the standard ifcopenshell API
-                                if hasattr(geometry, 'verts') and hasattr(geometry, 'faces'):
+                                if (vertices is None or faces is None) and hasattr(geometry, 'verts') and hasattr(geometry, 'faces'):
                                     try:
                                         verts = geometry.verts
                                         faces_data = geometry.faces
@@ -3238,7 +3284,88 @@ class IFCImporter(BaseImporter):
                 logger.warning("  - IFC file has no geometry data")
                 logger.warning("  - Geometry extraction failed for all elements")
                 logger.warning("  - IFC file uses unsupported geometry representation")
-                return None
+                
+                # CRITICAL FIX: Try alternative approach - process ALL elements regardless of type
+                logger.info("Attempting alternative geometry extraction: processing ALL IFC elements...")
+                try:
+                    # Get ALL elements that might have geometry
+                    all_elements = []
+                    for element_type in self.ifc_file.by_type("IfcProduct"):  # IfcProduct is base class for all spatial/geometric elements
+                        try:
+                            # Try to create shape for this element
+                            shape = geom.create_shape(settings, element_type)
+                            if shape and shape.geometry:
+                                all_elements.append((element_type, shape))
+                        except:
+                            continue
+                    
+                    logger.info(f"Found {len(all_elements)} elements with geometry using alternative method")
+                    
+                    # Process these elements using the same reliable methods
+                    for element, shape in all_elements:
+                        try:
+                            geometry = shape.geometry
+                            vertices = None
+                            faces = None
+                            
+                            # Try tessellation first (most reliable)
+                            try:
+                                if hasattr(geometry, 'tessellation'):
+                                    tess = geometry.tessellation()
+                                    if tess and isinstance(tess, tuple) and len(tess) >= 2:
+                                        vertices = np.array(tess[0], dtype=np.float64)
+                                        faces_data = tess[1]
+                                        faces = np.array(faces_data, dtype=np.int32)
+                                        if len(faces.shape) == 1 and len(faces) % 3 == 0:
+                                            faces = faces.reshape(-1, 3)
+                            except:
+                                pass
+                            
+                            # Fallback to verts/faces
+                            if (vertices is None or faces is None) and hasattr(geometry, 'verts') and hasattr(geometry, 'faces'):
+                                try:
+                                    verts = geometry.verts
+                                    faces_data = geometry.faces
+                                    
+                                    vertices = np.array(verts, dtype=np.float64)
+                                    if len(vertices.shape) == 1 and len(vertices) % 3 == 0:
+                                        vertices = vertices.reshape(-1, 3)
+                                    elif len(vertices.shape) != 2 or vertices.shape[1] != 3:
+                                        continue
+                                    
+                                    faces = np.array(faces_data, dtype=np.int32)
+                                    if len(faces.shape) == 1 and len(faces) % 3 == 0:
+                                        faces = faces.reshape(-1, 3)
+                                    elif len(faces.shape) != 2 or faces.shape[1] != 3:
+                                        continue
+                                except:
+                                    continue
+                            
+                            # Create mesh if we have valid data
+                            if vertices is not None and faces is not None and len(vertices) > 0 and len(faces) > 0:
+                                max_vertex_idx = np.max(faces) if len(faces) > 0 else -1
+                                if max_vertex_idx < len(vertices):
+                                    mesh = trimesh.Trimesh(vertices=vertices, faces=faces)
+                                    if len(mesh.vertices) > 0 and len(mesh.faces) > 0:
+                                        # Apply default color
+                                        default_color = np.array([200, 200, 200, 255], dtype=np.uint8)
+                                        num_faces = len(mesh.faces)
+                                        face_colors = np.tile(default_color, (num_faces, 1))
+                                        mesh.visual.face_colors = face_colors
+                                        meshes.append(mesh)
+                                        successful_elements += 1
+                        except Exception as e:
+                            logger.debug(f"Error processing element in alternative method: {e}")
+                            continue
+                    
+                    if meshes:
+                        logger.info(f"✓ Alternative method found {len(meshes)} meshes")
+                    else:
+                        logger.error("Alternative geometry extraction also failed - no meshes found")
+                        return None
+                except Exception as alt_error:
+                    logger.error(f"Alternative geometry extraction failed: {alt_error}")
+                    return None
             
             # Count meshes with colors (check if colors are not default gray)
             colored_meshes = 0

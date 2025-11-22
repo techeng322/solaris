@@ -915,27 +915,44 @@ else:
             logger = logging.getLogger(__name__)
             
             if self.mesh is None:
+                logger.warning("Cannot update Trimesh viewer: No mesh loaded")
                 return
             
             try:
                 # Close any existing pyglet windows
                 try:
                     import pyglet
-                    # Close all pyglet windows
-                    for window in pyglet.app.windows:
-                        window.close()
+                    if hasattr(pyglet, 'app') and hasattr(pyglet.app, 'windows'):
+                        # Close all pyglet windows
+                        windows_to_close = list(pyglet.app.windows)  # Create a copy to avoid modification during iteration
+                        for window in windows_to_close:
+                            try:
+                                window.close()
+                                logger.debug(f"Closed pyglet window: {window}")
+                            except Exception as e:
+                                logger.debug(f"Error closing pyglet window: {e}")
+                        logger.info(f"Closed {len(windows_to_close)} pyglet window(s)")
                 except Exception as e:
                     logger.debug(f"Could not close existing pyglet windows: {e}")
                 
                 # Create updated scene and show it
+                logger.info("Creating updated Trimesh scene with highlighted object...")
                 scene = self._create_trimesh_scene()
+                logger.info(f"Scene created with {len(scene.geometry)} geometry object(s)")
+                
+                # Show the updated scene
                 scene.show()
-                logger.info("Trimesh viewer updated with highlighted window")
+                logger.info("Trimesh viewer updated successfully with highlighted object")
             except Exception as e:
-                logger.warning(f"Could not update Trimesh viewer: {e}")
+                logger.error(f"Could not update Trimesh viewer: {e}", exc_info=True)
+                import traceback
+                logger.error(f"Traceback: {traceback.format_exc()}")
         
         def _create_window_mesh(self, window):
-            """Create a trimesh representation of an object (window or any object) from its properties. Works for any object with center, normal, and size attributes."""
+            """Create a trimesh representation of an object (window or any object) from its properties. Works for any object with center, normal, and size attributes.
+            
+            Creates a visible box-shaped highlight that extends slightly from the surface for better visibility.
+            """
             import trimesh
             import numpy as np
             import logging
@@ -957,6 +974,9 @@ else:
             center = np.array(window.center)
             normal = np.array(window.normal)
             width, height = window.size
+            
+            # Log window properties for debugging
+            logger.info(f"Creating highlight for {window.id}: center={center}, normal={normal}, size={width}x{height}")
             
             # Validate size values
             if width <= 0 or height <= 0:
@@ -999,26 +1019,57 @@ else:
             else:
                 up = np.array([0, 0, 1]) if abs(normal[2]) < 0.9 else np.array([0, 1, 0])
             
-            # Create rectangle vertices
+            # Create a box-shaped highlight for better visibility
+            # Extend slightly outward from the surface (0.05m or 5% of smallest dimension)
+            thickness = min(width, height) * 0.05  # 5% of smallest dimension, but at least 0.05m
+            thickness = max(0.05, min(thickness, 0.2))  # Clamp between 0.05m and 0.2m
+            
+            # Position the box slightly in front of the surface (along normal)
+            offset = normal * (thickness / 2.0)
+            box_center = center + offset
+            
+            # Create box dimensions
             half_width = width / 2.0
             half_height = height / 2.0
+            half_thickness = thickness / 2.0
             
-            corners = [
-                center + (-half_width * right) + (-half_height * up),
-                center + (half_width * right) + (-half_height * up),
-                center + (half_width * right) + (half_height * up),
-                center + (-half_width * right) + (half_height * up)
+            # Create box vertices (8 corners of a box)
+            # Front face (in direction of normal)
+            front_corners = [
+                box_center + normal * half_thickness + (-half_width * right) + (-half_height * up),
+                box_center + normal * half_thickness + (half_width * right) + (-half_height * up),
+                box_center + normal * half_thickness + (half_width * right) + (half_height * up),
+                box_center + normal * half_thickness + (-half_width * right) + (half_height * up)
             ]
             
-            # Create two triangles
-            vertices = np.array(corners)
-            faces = np.array([
-                [0, 1, 2],
-                [0, 2, 3]
-            ])
+            # Back face (opposite direction)
+            back_corners = [
+                box_center - normal * half_thickness + (-half_width * right) + (-half_height * up),
+                box_center - normal * half_thickness + (half_width * right) + (-half_height * up),
+                box_center - normal * half_thickness + (half_width * right) + (half_height * up),
+                box_center - normal * half_thickness + (-half_width * right) + (half_height * up)
+            ]
             
-            # Create trimesh (works for windows and other objects)
+            # Combine all vertices
+            vertices = np.array(front_corners + back_corners)
+            
+            # Create box faces (12 triangles for a box: 2 per face * 6 faces)
+            # Vertex indices: 0-3 = front face, 4-7 = back face
+            # 0=front-bottom-left, 1=front-bottom-right, 2=front-top-right, 3=front-top-left
+            # 4=back-bottom-left, 5=back-bottom-right, 6=back-top-right, 7=back-top-left
+            faces = [
+                [0, 1, 2], [0, 2, 3],  # Front face (facing normal direction)
+                [4, 6, 5], [4, 7, 6],  # Back face (opposite normal)
+                [1, 5, 6], [1, 6, 2],  # Right face (connecting front-right to back-right)
+                [0, 3, 7], [0, 7, 4],  # Left face (connecting front-left to back-left)
+                [0, 4, 5], [0, 5, 1],  # Bottom face
+                [3, 2, 6], [3, 6, 7]   # Top face
+            ]
+            
+            # Create trimesh box (more visible than flat rectangle)
             object_mesh = trimesh.Trimesh(vertices=vertices, faces=faces)
+            
+            logger.debug(f"Created highlight box for {window.id}: center={center}, size={width}x{height}, thickness={thickness:.3f}m")
             return object_mesh
         
         def _create_trimesh_scene(self):
@@ -1052,16 +1103,34 @@ else:
                 object_id = getattr(self.highlighted_window, 'id', 'unknown')
                 object_mesh = self.window_meshes.get(object_id)
                 if object_mesh is not None:
-                    # Color the object mesh blue/cyan for highlighting
+                    # Color the object mesh bright blue/cyan for highlighting (more visible)
                     try:
-                        object_mesh.visual.face_colors = [0, 128, 255, 200]  # Blue with transparency
-                        scene.add_geometry(object_mesh, node_name=f'highlighted_{object_id}')
-                        logger.info(f"Added highlighted object {object_id} to Trimesh scene")
+                        # Create a copy to avoid modifying the cached mesh
+                        import copy
+                        import numpy as np
+                        highlighted_mesh = copy.deepcopy(object_mesh)
+                        
+                        # Set face colors correctly - trimesh expects (num_faces, 4) array for RGBA
+                        # Format: numpy array with shape (num_faces, 4), dtype uint8, values 0-255
+                        num_faces = len(highlighted_mesh.faces)
+                        # Bright cyan-blue color: RGB(0, 200, 255), alpha: 180 (semi-transparent)
+                        color_rgba = np.array([0, 200, 255, 180], dtype=np.uint8)
+                        # Apply color to all faces (tile the color for each face)
+                        face_colors = np.tile(color_rgba, (num_faces, 1))
+                        highlighted_mesh.visual.face_colors = face_colors
+                        
+                        logger.info(f"Colored highlight mesh for {object_id}: {num_faces} faces, color RGBA(0, 200, 255, 180)")
+                        logger.debug(f"Face colors shape: {face_colors.shape}, dtype: {face_colors.dtype}, sample: {face_colors[0] if len(face_colors) > 0 else 'empty'}")
+                        scene.add_geometry(highlighted_mesh, node_name=f'highlighted_{object_id}')
+                        logger.info(f"Added highlighted object {object_id} to Trimesh scene: {len(highlighted_mesh.vertices)} vertices, {len(highlighted_mesh.faces)} faces")
                     except Exception as e:
-                        logger.warning(f"Could not color object mesh: {e}, showing without color")
-                        scene.add_geometry(object_mesh, node_name=f'highlighted_{object_id}')
+                        logger.warning(f"Could not color object mesh: {e}, showing without color", exc_info=True)
+                        try:
+                            scene.add_geometry(object_mesh, node_name=f'highlighted_{object_id}')
+                        except Exception as e2:
+                            logger.error(f"Failed to add object mesh to scene: {e2}", exc_info=True)
                 else:
-                    logger.warning(f"Object mesh not available for {object_id}")
+                    logger.warning(f"Object mesh not available for {object_id} - mesh may not have been created")
             
             logger.info(f"Trimesh scene created with {len(scene.geometry)} geometry object(s)")
             return scene
