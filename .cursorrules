@@ -405,7 +405,65 @@ def show_glb_viewer(self):
 
 # Scratchpad
 
-## Current Task: IFC Color and Style Extraction
+## Current Task: IFC Window Size Validation - Fix Incorrect Window Detection
+
+Status: ✅ **COMPLETE** ✅
+
+**Requirement**: 
+- User reported windows with areas over 2,000,000 m² (clearly incorrect)
+- Need to add validation to reject windows with unreasonable dimensions
+- Filter out large building elements (walls, floors) that are incorrectly detected as windows
+
+**Implementation COMPLETED**:
+[X] **Window Size Validation Constants**: 
+  - Added `MIN_WINDOW_WIDTH = 0.1m`, `MAX_WINDOW_WIDTH = 10.0m`
+  - Added `MIN_WINDOW_HEIGHT = 0.1m`, `MAX_WINDOW_HEIGHT = 10.0m`
+  - Added `MIN_WINDOW_AREA = 0.01 m²`, `MAX_WINDOW_AREA = 50.0 m²`
+[X] **Validation Method**: 
+  - Added `_is_valid_window_size()` method - validates width, height, and area
+  - Returns False if dimensions are outside reasonable window ranges
+  - Logs debug messages explaining why windows are rejected
+[X] **Validation in All Extraction Methods**: 
+  - `_extract_window()` - validates size before creating Window object
+  - `_extract_window_from_opening()` - validates size early, rejects invalid openings
+  - `_extract_window_from_plate()` - validates size early, rejects invalid plates
+  - `_extract_window_from_geometry()` - validates size early, rejects invalid elements
+  - `_extract_window_geometry()` - validates size before returning, raises ValueError for invalid sizes
+[X] **Exception Handling**: 
+  - All extraction methods handle `ValueError` from `_extract_window_geometry()`
+  - Invalid windows are rejected with warning messages
+  - Default sizes are also validated before use
+
+**Changes Made**:
+- **importers/ifc_importer.py**: 
+  - Added window size validation constants (lines 27-33)
+  - Added `_is_valid_window_size()` method (lines 797-826)
+  - Added validation in `_extract_window()` (lines 900-903)
+  - Added validation in `_extract_window_from_opening()` (lines 1035-1042)
+  - Added validation in `_extract_window_from_plate()` (lines 1109-1115)
+  - Added validation in `_extract_window_from_geometry()` (lines 611-617)
+  - Added validation in `_extract_window_geometry()` (lines 1475-1480)
+  - Enhanced exception handling in all extraction methods
+
+**Technical Details**:
+- **Validation Criteria**: 
+  - Width: 0.1m - 10.0m (10cm to 10m)
+  - Height: 0.1m - 10.0m (10cm to 10m)
+  - Area: 0.01 m² - 50.0 m² (100 cm² to 50 m²)
+- **Early Rejection**: Windows with invalid sizes are rejected immediately, preventing creation of invalid Window objects
+- **Logging**: All rejections are logged with detailed information (size, area, element ID)
+- **Multiple Validation Points**: Validation occurs at multiple levels for robustness
+
+**Benefits**:
+- **Accurate Detection**: Only windows with reasonable dimensions are extracted
+- **Filters Large Elements**: Large building elements (walls, floors) are automatically rejected
+- **Better Data Quality**: Prevents incorrect calculations from invalid window data
+- **Clear Logging**: Detailed warnings help identify why elements are rejected
+- **Robust**: Multiple validation points ensure invalid windows are caught
+
+**Status**: ✅ **IFC WINDOW SIZE VALIDATION COMPLETE**
+
+## Previous Task: IFC Color and Style Extraction
 
 Status: ✅ **COMPLETE** ✅
 

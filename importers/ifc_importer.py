@@ -22,6 +22,15 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+# Window size validation constants (in meters)
+# Windows should be reasonable size - typical windows are 0.3m to 5m in each dimension
+MIN_WINDOW_WIDTH = 0.1  # Minimum window width (10cm)
+MAX_WINDOW_WIDTH = 10.0  # Maximum window width (10m - very large windows)
+MIN_WINDOW_HEIGHT = 0.1  # Minimum window height (10cm)
+MAX_WINDOW_HEIGHT = 10.0  # Maximum window height (10m - very tall windows)
+MIN_WINDOW_AREA = 0.01  # Minimum window area (0.01 m² = 100 cm²)
+MAX_WINDOW_AREA = 50.0  # Maximum window area (50 m² - very large windows)
+
 
 class IFCImporter(BaseImporter):
     """
@@ -598,6 +607,15 @@ class IFCImporter(BaseImporter):
             # Extract geometry
             try:
                 center, normal, size = self._extract_window_geometry(element)
+                # Early validation - reject if size is unreasonable
+                if not self._is_valid_window_size(size):
+                    area = size[0] * size[1] if size[0] > 0 and size[1] > 0 else 0
+                    logger.warning(f"Element {element_id} ({element_type}) has unreasonable size {size} (area: {area:.2f} m²) - REJECTING as invalid window")
+                    return None
+            except ValueError as e:
+                # Geometry extraction raised ValueError due to invalid size
+                logger.warning(f"Element {element_id} ({element_type}) rejected due to invalid size: {e}")
+                return None
             except Exception as e:
                 logger.warning(f"Failed to extract geometry from {element_type} {element_id}: {e}")
                 return None
@@ -621,6 +639,12 @@ class IFCImporter(BaseImporter):
             except Exception as e:
                 logger.debug(f"Error extracting color/style: {e}")
             
+            # Validate window size - reject unreasonable dimensions
+            if not self._is_valid_window_size(size):
+                area = size[0] * size[1] if size[0] > 0 and size[1] > 0 else 0
+                logger.warning(f"Element {element_id} ({element_type}) has unreasonable size {size} (area: {area:.2f} m²) - REJECTING as invalid window")
+                return None
+            
             # Set window properties
             window_props = {
                 'window_type': 'double_glazed',  # Default
@@ -630,6 +654,13 @@ class IFCImporter(BaseImporter):
                 'source': element_type  # Mark source element type
             }
             window_props.update(properties)
+            
+            # Store IFC element reference for geometry extraction during highlighting
+            window_props['ifc_element_id'] = str(element.id())
+            if hasattr(element, 'GlobalId'):
+                window_props['ifc_global_id'] = element.GlobalId
+            window_props['ifc_element_type'] = element_type
+            window_props['ifc_file_path'] = self.file_path
             
             window = Window(
                 id=f"{element_type}_{element_id}",
@@ -769,6 +800,38 @@ class IFCImporter(BaseImporter):
         
         return windows
     
+    def _is_valid_window_size(self, size: Tuple[float, float]) -> bool:
+        """
+        Validate that window size is reasonable.
+        
+        Args:
+            size: Tuple of (width, height) in meters
+            
+        Returns:
+            True if size is valid for a window, False otherwise
+        """
+        if size[0] <= 0 or size[1] <= 0:
+            return False
+        
+        width, height = size[0], size[1]
+        area = width * height
+        
+        # Check individual dimensions
+        if width < MIN_WINDOW_WIDTH or width > MAX_WINDOW_WIDTH:
+            logger.debug(f"Window width {width:.2f}m is outside valid range [{MIN_WINDOW_WIDTH}, {MAX_WINDOW_WIDTH}]")
+            return False
+        
+        if height < MIN_WINDOW_HEIGHT or height > MAX_WINDOW_HEIGHT:
+            logger.debug(f"Window height {height:.2f}m is outside valid range [{MIN_WINDOW_HEIGHT}, {MAX_WINDOW_HEIGHT}]")
+            return False
+        
+        # Check area
+        if area < MIN_WINDOW_AREA or area > MAX_WINDOW_AREA:
+            logger.debug(f"Window area {area:.2f}m² is outside valid range [{MIN_WINDOW_AREA}, {MAX_WINDOW_AREA}]")
+            return False
+        
+        return True
+    
     def _extract_window(self, window_elem) -> Optional[Window]:
         """Extract window from IFC window element."""
         try:
@@ -782,12 +845,20 @@ class IFCImporter(BaseImporter):
             try:
                 center, normal, size = self._extract_window_geometry(window_elem)
                 logger.debug(f"Window {window_id}: center={center}, size={size}, normal={normal}")
+            except ValueError as e:
+                # Invalid size - reject this window
+                logger.warning(f"Window {window_id} rejected due to invalid size: {e}")
+                return None
             except Exception as e:
                 logger.error(f"Failed to extract geometry for window {window_id}: {e}", exc_info=True)
                 # Use defaults
                 center = (0.0, 0.0, 1.5)
                 normal = (0.0, 1.0, 0.0)
                 size = (1.5, 1.2)
+                # Validate defaults too
+                if not self._is_valid_window_size(size):
+                    logger.warning(f"Window {window_id} default size is invalid - REJECTING")
+                    return None
             
             # Extract all properties (enhanced - supports all IFC property types)
             try:
@@ -860,10 +931,18 @@ class IFCImporter(BaseImporter):
             # Merge all properties
             window_props.update(all_properties)
             
-            # Validate window data
-            if size[0] <= 0 or size[1] <= 0:
-                logger.warning(f"Invalid window size {size} for window {window_id}, using defaults")
-                size = (1.5, 1.2)
+            # Validate window data - check for reasonable dimensions
+            if not self._is_valid_window_size(size):
+                area = size[0] * size[1] if size[0] > 0 and size[1] > 0 else 0
+                logger.warning(f"Window {window_id} has unreasonable size {size} (area: {area:.2f} m²) - REJECTING as invalid window")
+                return None
+            
+            # Store IFC element reference for geometry extraction during highlighting
+            window_props['ifc_element_id'] = str(window_elem.id())
+            if hasattr(window_elem, 'GlobalId'):
+                window_props['ifc_global_id'] = window_elem.GlobalId
+            window_props['ifc_element_type'] = window_elem.is_a()
+            window_props['ifc_file_path'] = self.file_path  # Store file path for later geometry extraction
             
             window = Window(
                 id=window_id,
@@ -975,12 +1054,25 @@ class IFCImporter(BaseImporter):
             # Extract geometry
             try:
                 center, normal, size = self._extract_window_geometry(opening_elem)
+                # Early validation - reject if size is unreasonable
+                if not self._is_valid_window_size(size):
+                    area = size[0] * size[1] if size[0] > 0 and size[1] > 0 else 0
+                    logger.warning(f"Opening {opening_id} has unreasonable size {size} (area: {area:.2f} m²) - REJECTING as invalid window")
+                    return None
+            except ValueError as e:
+                # Geometry extraction raised ValueError due to invalid size
+                logger.warning(f"Opening {opening_id} rejected due to invalid size: {e}")
+                return None
             except Exception as e:
                 logger.warning(f"Failed to extract geometry from opening {opening_id}: {e}")
                 # Use defaults
                 center = (0.0, 0.0, 1.5)
                 normal = (0.0, 1.0, 0.0)
                 size = (1.5, 1.2)
+                # Validate defaults too
+                if not self._is_valid_window_size(size):
+                    logger.warning(f"Opening {opening_id} default size is invalid - REJECTING")
+                    return None
             
             # Extract properties
             window_props = {
@@ -990,6 +1082,19 @@ class IFCImporter(BaseImporter):
                 'frame_factor': 0.70
             }
             window_props.update(properties)
+            
+            # Validate window size - reject unreasonable dimensions
+            if not self._is_valid_window_size(size):
+                area = size[0] * size[1] if size[0] > 0 and size[1] > 0 else 0
+                logger.warning(f"Opening {opening_id} has unreasonable size {size} (area: {area:.2f} m²) - REJECTING as invalid window")
+                return None
+            
+            # Store IFC element reference for geometry extraction during highlighting
+            window_props['ifc_element_id'] = str(opening_elem.id())
+            if hasattr(opening_elem, 'GlobalId'):
+                window_props['ifc_global_id'] = opening_elem.GlobalId
+            window_props['ifc_element_type'] = opening_elem.is_a()
+            window_props['ifc_file_path'] = self.file_path
             
             window = Window(
                 id=f"Opening_{opening_id}",
@@ -1029,12 +1134,25 @@ class IFCImporter(BaseImporter):
             # Extract geometry
             try:
                 center, normal, size = self._extract_window_geometry(plate_elem)
+                # Early validation - reject if size is unreasonable
+                if not self._is_valid_window_size(size):
+                    area = size[0] * size[1] if size[0] > 0 and size[1] > 0 else 0
+                    logger.warning(f"Plate {plate_id} has unreasonable size {size} (area: {area:.2f} m²) - REJECTING as invalid window")
+                    return None
+            except ValueError as e:
+                # Geometry extraction raised ValueError due to invalid size
+                logger.warning(f"Plate {plate_id} rejected due to invalid size: {e}")
+                return None
             except Exception as e:
                 logger.warning(f"Failed to extract geometry from plate {plate_id}: {e}")
                 # Use defaults
                 center = (0.0, 0.0, 1.5)
                 normal = (0.0, 1.0, 0.0)
                 size = (1.5, 1.2)
+                # Validate defaults too
+                if not self._is_valid_window_size(size):
+                    logger.warning(f"Plate {plate_id} default size is invalid - REJECTING")
+                    return None
             
             # Extract properties
             properties = self._extract_properties(plate_elem)
@@ -1055,6 +1173,12 @@ class IFCImporter(BaseImporter):
             except Exception as e:
                 logger.debug(f"Error extracting color/style for plate {plate_id}: {e}")
             
+            # Validate window size - reject unreasonable dimensions
+            if not self._is_valid_window_size(size):
+                area = size[0] * size[1] if size[0] > 0 and size[1] > 0 else 0
+                logger.warning(f"Plate {plate_id} has unreasonable size {size} (area: {area:.2f} m²) - REJECTING as invalid window")
+                return None
+            
             # Set window properties (glazing panels are typically double-glazed)
             window_props = {
                 'window_type': 'double_glazed',
@@ -1064,6 +1188,13 @@ class IFCImporter(BaseImporter):
                 'source': 'IfcPlate'  # Mark as extracted from plate
             }
             window_props.update(properties)
+            
+            # Store IFC element reference for geometry extraction during highlighting
+            window_props['ifc_element_id'] = str(plate_elem.id())
+            if hasattr(plate_elem, 'GlobalId'):
+                window_props['ifc_global_id'] = plate_elem.GlobalId
+            window_props['ifc_element_type'] = plate_elem.is_a()
+            window_props['ifc_file_path'] = self.file_path
             
             window = Window(
                 id=f"Plate_{plate_id}",
@@ -1412,6 +1543,14 @@ class IFCImporter(BaseImporter):
         size = (width, height)
         logger.debug(f"Using size from properties/type/geometry/defaults: {size}")
         
+        # Validate size BEFORE extracting position/normal (early rejection of invalid windows)
+        if not self._is_valid_window_size(size):
+            area = width * height
+            element_id = window_elem.id() if hasattr(window_elem, 'id') else 'unknown'
+            logger.warning(f"Window element {element_id} has unreasonable size {size} (area: {area:.2f} m²) - rejecting")
+            # Return None to indicate invalid window (caller should handle)
+            raise ValueError(f"Invalid window size: {size} (area: {area:.2f} m²)")
+        
         # Extract position from properties or placement
         center = self._extract_window_position(window_elem, properties)
         
@@ -1506,21 +1645,77 @@ class IFCImporter(BaseImporter):
         return None
     
     def _extract_window_normal(self, window_elem, properties: Dict) -> Tuple[float, float, float]:
-        """Extract window normal (direction) from IFC element placement."""
-        # Try to get from ObjectPlacement rotation
+        """
+        Extract window normal (direction window faces) from IFC element placement.
+        
+        In IFC, the window normal is typically the Y-axis of the transformation matrix,
+        which represents the direction perpendicular to the window plane (the direction the window faces).
+        """
+        # Method 1: Try to extract from geometry transformation matrix (most accurate)
+        if not self.lightweight:
+            try:
+                settings = geom.settings()
+                shape = geom.create_shape(settings, window_elem)
+                if hasattr(shape, 'transformation') and shape.transformation:
+                    matrix = shape.transformation.matrix.data
+                    if len(matrix) >= 16:
+                        # IFC transformation matrix is 4x4 stored as 16-element array
+                        # Column 0-3: X-axis (right direction)
+                        # Column 4-7: Y-axis (window normal - direction window faces) ← THIS IS WHAT WE NEED
+                        # Column 8-11: Z-axis (up direction)
+                        # Column 12-15: Translation (position)
+                        # Extract Y-axis (columns 4, 5, 6) as the window normal
+                        normal = (
+                            float(matrix[4]),
+                            float(matrix[5]),
+                            float(matrix[6])
+                        )
+                        # Normalize
+                        norm_length = (normal[0]**2 + normal[1]**2 + normal[2]**2)**0.5
+                        if norm_length > 1e-6:
+                            normal = (normal[0]/norm_length, normal[1]/norm_length, normal[2]/norm_length)
+                            logger.debug(f"Extracted window normal from transformation matrix Y-axis: {normal}")
+                            return normal
+            except Exception as e:
+                logger.debug(f"Error extracting window normal from geometry: {e}")
+        
+        # Method 2: Try to get from ObjectPlacement rotation (IfcAxis2Placement3D)
         try:
             if hasattr(window_elem, 'ObjectPlacement') and window_elem.ObjectPlacement:
                 placement = window_elem.ObjectPlacement
                 if hasattr(placement, 'RelativePlacement') and placement.RelativePlacement:
-                    axis = placement.RelativePlacement.Axis
-                    if axis and hasattr(axis, 'DirectionRatios'):
-                        ratios = axis.DirectionRatios
-                        if len(ratios) >= 3:
-                            return (float(ratios[0]), float(ratios[1]), float(ratios[2]))
+                    rel_placement = placement.RelativePlacement
+                    # IfcAxis2Placement3D has RefDirection (X-axis) and Axis (Z-axis)
+                    # The Y-axis (window normal) is perpendicular to both
+                    if hasattr(rel_placement, 'RefDirection') and rel_placement.RefDirection:
+                        ref_dir = rel_placement.RefDirection
+                        if hasattr(ref_dir, 'DirectionRatios'):
+                            x_axis = ref_dir.DirectionRatios
+                            if len(x_axis) >= 3:
+                                x_axis = np.array([float(x_axis[0]), float(x_axis[1]), float(x_axis[2])])
+                                
+                                # Get Z-axis (up direction)
+                                z_axis = None
+                                if hasattr(rel_placement, 'Axis') and rel_placement.Axis:
+                                    axis = rel_placement.Axis
+                                    if hasattr(axis, 'DirectionRatios'):
+                                        z_ratios = axis.DirectionRatios
+                                        if len(z_ratios) >= 3:
+                                            z_axis = np.array([float(z_ratios[0]), float(z_ratios[1]), float(z_ratios[2])])
+                                
+                                # Calculate Y-axis (window normal) = Z × X (cross product)
+                                if z_axis is not None:
+                                    y_axis = np.cross(z_axis, x_axis)
+                                    norm = np.linalg.norm(y_axis)
+                                    if norm > 1e-6:
+                                        y_axis = y_axis / norm
+                                        normal = tuple(y_axis)
+                                        logger.debug(f"Extracted window normal from placement axes: {normal}")
+                                        return normal
         except Exception as e:
-            logger.debug(f"Error extracting window normal: {e}")
+            logger.debug(f"Error extracting window normal from placement: {e}")
         
-        # Fallback: use properties or default (facing north)
+        # Method 3: Fallback: use properties or default (facing north)
         direction = properties.get('Direction', 'North')
         direction_map = {
             'North': (0.0, 1.0, 0.0),
@@ -1528,7 +1723,184 @@ class IFCImporter(BaseImporter):
             'East': (1.0, 0.0, 0.0),
             'West': (-1.0, 0.0, 0.0)
         }
+        logger.debug(f"Using fallback direction for window normal: {direction}")
         return direction_map.get(direction, (0.0, 1.0, 0.0))
+    
+    @staticmethod
+    def extract_element_mesh(ifc_file_path: str, element_id: str) -> Optional['trimesh.Trimesh']:
+        """
+        Extract actual geometry mesh for a specific IFC element by ID.
+        Used for highlighting objects with their actual geometry instead of synthetic meshes.
+        
+        Args:
+            ifc_file_path: Path to IFC file
+            element_id: IFC element ID (as string)
+            
+        Returns:
+            trimesh.Trimesh object with element geometry, or None if extraction fails
+        """
+        if not TRIMESH_AVAILABLE:
+            logger.warning("trimesh not available - cannot extract element mesh")
+            return None
+        
+        try:
+            # Open IFC file
+            ifc_file = ifcopenshell.open(ifc_file_path)
+            
+            # Get element by ID
+            try:
+                element_id_int = int(element_id)
+                element = ifc_file.by_id(element_id_int)
+            except (ValueError, RuntimeError):
+                logger.warning(f"Could not find element with ID {element_id} in IFC file")
+                return None
+            
+            if element is None:
+                logger.warning(f"Element {element_id} not found in IFC file")
+                return None
+            
+            # Extract geometry using ifcopenshell
+            # CRITICAL: Use the SAME settings as main mesh generation to ensure coordinate system consistency
+            settings = geom.settings()
+            try:
+                # Enable world coordinates (same as main mesh generation)
+                if hasattr(settings, 'USE_WORLD_COORDS'):
+                    settings.set(settings.USE_WORLD_COORDS, True)
+                    logger.debug(f"Enabled world coordinates for element {element_id}")
+            except Exception as e:
+                logger.debug(f"Could not enable world coordinates: {e}")
+            
+            # Use the same additional settings as main mesh generation for consistency
+            try:
+                if hasattr(settings, 'USE_BREP_DATA'):
+                    settings.set(settings.USE_BREP_DATA, True)
+                if hasattr(settings, 'USE_PYTHON_OPENCASCADE'):
+                    settings.set(settings.USE_PYTHON_OPENCASCADE, False)
+                if hasattr(settings, 'SEW_SHELLS'):
+                    settings.set(settings.SEW_SHELLS, True)
+                if hasattr(settings, 'DISABLE_OPENING_SUBTRACTION'):
+                    settings.set(settings.DISABLE_OPENING_SUBTRACTION, False)
+                if hasattr(settings, 'USE_MATERIAL_COLOR'):
+                    settings.set(settings.USE_MATERIAL_COLOR, True)
+                if hasattr(settings, 'WELD_VERTICES'):
+                    settings.set(settings.WELD_VERTICES, False)
+            except Exception as e:
+                logger.debug(f"Some geometry settings could not be configured: {e}")
+            
+            try:
+                shape = geom.create_shape(settings, element)
+                geometry = shape.geometry
+            except Exception as e:
+                logger.debug(f"Could not create shape for element {element_id}: {e}")
+                return None
+            
+            # Extract vertices and faces
+            vertices = None
+            faces = None
+            
+            # Method 1: Use tessellation
+            try:
+                if hasattr(geometry, 'tessellation'):
+                    tess = geometry.tessellation()
+                    if tess and isinstance(tess, tuple) and len(tess) >= 2:
+                        vertices = np.array(tess[0], dtype=np.float64)
+                        faces_data = tess[1]
+                        faces = np.array(faces_data, dtype=np.int32)
+                        if len(faces.shape) == 1 and len(faces) % 3 == 0:
+                            faces = faces.reshape(-1, 3)
+            except Exception as e:
+                logger.debug(f"Tessellation failed for element {element_id}: {e}")
+            
+            # Method 2: Direct access to verts/faces
+            if (vertices is None or faces is None) and hasattr(geometry, 'verts') and hasattr(geometry, 'faces'):
+                try:
+                    verts = geometry.verts
+                    faces_data = geometry.faces
+                    vertices = np.array(verts, dtype=np.float64)
+                    if len(vertices.shape) == 1 and len(vertices) % 3 == 0:
+                        vertices = vertices.reshape(-1, 3)
+                    faces = np.array(faces_data, dtype=np.int32)
+                    if len(faces.shape) == 1 and len(faces) % 3 == 0:
+                        faces = faces.reshape(-1, 3)
+                except Exception as e:
+                    logger.debug(f"Direct verts/faces access failed for element {element_id}: {e}")
+            
+            # CRITICAL: Apply transformation matrix if available and not identity
+            # Even with USE_WORLD_COORDS, some ifcopenshell versions may not apply transformations correctly
+            # Check if transformation is non-identity before applying
+            if vertices is not None and hasattr(shape, 'transformation') and shape.transformation:
+                try:
+                    matrix = shape.transformation.matrix.data
+                    if len(matrix) >= 16:
+                        # Check if transformation matrix is identity (no transformation needed)
+                        identity = np.array([
+                            [1, 0, 0, 0],
+                            [0, 1, 0, 0],
+                            [0, 0, 1, 0],
+                            [0, 0, 0, 1]
+                        ])
+                        transform_matrix = np.array([
+                            [matrix[0], matrix[1], matrix[2], matrix[3]],
+                            [matrix[4], matrix[5], matrix[6], matrix[7]],
+                            [matrix[8], matrix[9], matrix[10], matrix[11]],
+                            [matrix[12], matrix[13], matrix[14], matrix[15]]
+                        ])
+                        
+                        # Check if matrix is significantly different from identity
+                        if not np.allclose(transform_matrix, identity, atol=1e-6):
+                            # Apply transformation to all vertices
+                            # Add homogeneous coordinate (w=1) to vertices
+                            vertices_homogeneous = np.hstack([vertices, np.ones((len(vertices), 1))])
+                            # Transform: v' = M * v
+                            vertices_transformed = (transform_matrix @ vertices_homogeneous.T).T
+                            # Extract x, y, z (drop w coordinate)
+                            vertices = vertices_transformed[:, :3]
+                            logger.debug(f"Applied transformation matrix to {len(vertices)} vertices for element {element_id}")
+                        else:
+                            logger.debug(f"Transformation matrix is identity for element {element_id} - no transformation needed")
+                except Exception as e:
+                    logger.debug(f"Could not apply transformation matrix for element {element_id}: {e}")
+                    # Continue without transformation - USE_WORLD_COORDS might have already applied it
+            
+            # Create mesh if we have valid data
+            if vertices is not None and faces is not None and len(vertices) > 0 and len(faces) > 0:
+                try:
+                    # Validate face indices
+                    max_vertex_idx = np.max(faces)
+                    if max_vertex_idx >= len(vertices):
+                        # Filter out invalid faces
+                        valid_faces = []
+                        for face in faces:
+                            if all(0 <= idx < len(vertices) for idx in face):
+                                valid_faces.append(face)
+                        if len(valid_faces) > 0:
+                            faces = np.array(valid_faces, dtype=np.int32)
+                        else:
+                            logger.warning(f"All faces invalid for element {element_id}")
+                            return None
+                    
+                    mesh = trimesh.Trimesh(vertices=vertices, faces=faces)
+                    
+                    # Validate mesh
+                    if len(mesh.vertices) > 0 and len(mesh.faces) > 0:
+                        logger.info(f"✓ Extracted mesh for element {element_id}: {len(mesh.vertices)} vertices, {len(mesh.faces)} faces")
+                        # Log mesh bounds for debugging
+                        bounds = mesh.bounds
+                        logger.debug(f"Mesh bounds: min={bounds[0]}, max={bounds[1]}")
+                        return mesh
+                    else:
+                        logger.warning(f"Created mesh is empty for element {element_id}")
+                        return None
+                except Exception as e:
+                    logger.error(f"Failed to create mesh for element {element_id}: {e}", exc_info=True)
+                    return None
+            else:
+                logger.warning(f"Could not extract valid geometry for element {element_id}: vertices={vertices is not None and len(vertices) if vertices is not None else None}, faces={faces is not None and len(faces) if faces is not None else None}")
+                return None
+                
+        except Exception as e:
+            logger.warning(f"Error extracting mesh for element {element_id} from {ifc_file_path}: {e}")
+            return None
     
     def _extract_geometry_from_ifc(self, element) -> Tuple[Tuple[float, float, float], Tuple[float, float, float], Tuple[float, float]]:
         """
@@ -1618,22 +1990,42 @@ class IFCImporter(BaseImporter):
             size = (float(dims[0]), float(dims[1]))  # width, height
             
             # Extract normal from transformation matrix if available
+            # In IFC, the window normal is the Y-axis of the transformation matrix
+            # (the direction perpendicular to the window plane, i.e., the direction the window faces)
             normal = (0.0, 1.0, 0.0)  # Default facing north
             try:
                 if hasattr(shape, 'transformation') and shape.transformation:
-                    # Extract Z-axis from transformation matrix (window normal)
                     matrix = shape.transformation.matrix.data
-                    if len(matrix) >= 12:
-                        # Z-axis is typically columns 8, 9, 10 (0-indexed: 8, 9, 10)
+                    if len(matrix) >= 16:
+                        # IFC transformation matrix is 4x4 stored as 16-element array
+                        # Column 0-3: X-axis (right direction)
+                        # Column 4-7: Y-axis (window normal - direction window faces) ← THIS IS WHAT WE NEED
+                        # Column 8-11: Z-axis (up direction)
+                        # Column 12-15: Translation (position)
+                        # Extract Y-axis (columns 4, 5, 6) as the window normal
+                        normal = (
+                            float(matrix[4]),
+                            float(matrix[5]),
+                            float(matrix[6])
+                        )
+                        # Normalize
+                        norm_length = (normal[0]**2 + normal[1]**2 + normal[2]**2)**0.5
+                        if norm_length > 1e-6:
+                            normal = (normal[0]/norm_length, normal[1]/norm_length, normal[2]/norm_length)
+                            logger.debug(f"Extracted window normal from transformation matrix Y-axis: {normal}")
+                        else:
+                            logger.debug("Normal vector has zero length, using default")
+                    elif len(matrix) >= 12:
+                        # Fallback for older matrix format - try Z-axis
                         normal = (
                             float(matrix[8]),
                             float(matrix[9]),
                             float(matrix[10])
                         )
-                        # Normalize
                         norm_length = (normal[0]**2 + normal[1]**2 + normal[2]**2)**0.5
-                        if norm_length > 0:
+                        if norm_length > 1e-6:
                             normal = (normal[0]/norm_length, normal[1]/norm_length, normal[2]/norm_length)
+                            logger.debug(f"Extracted window normal from transformation matrix Z-axis (fallback): {normal}")
             except Exception as e:
                 logger.debug(f"Could not extract normal from transformation: {e}")
             
@@ -2643,6 +3035,213 @@ class IFCImporter(BaseImporter):
         
         return style_info
     
+    def _extract_comprehensive_element_metadata(self, element, shape=None) -> Dict:
+        """
+        Extract comprehensive metadata for an IFC element: type, color, and material.
+        This is the ULTIMATE extraction method that combines all extraction strategies.
+        
+        Returns:
+            Dictionary with comprehensive metadata:
+            - element_type: Detailed type classification
+            - element_type_hierarchy: Full IFC type hierarchy
+            - element_name: Element name/identifier
+            - element_global_id: Global unique identifier
+            - color_style: Complete color and style information
+            - material_properties: Complete material information
+            - material_name: Primary material name
+            - material_type: Material type (IfcMaterial, IfcMaterialLayerSet, etc.)
+            - has_glazing: Whether element has glazing material
+            - is_window: Whether element is a window
+            - all_materials: List of all materials found
+            - properties: Element properties
+            - representation_type: Type of representation used
+        """
+        metadata = {
+            'element_type': None,
+            'element_type_hierarchy': [],
+            'element_name': None,
+            'element_global_id': None,
+            'color_style': {},
+            'material_properties': {},
+            'material_name': None,
+            'material_type': None,
+            'has_glazing': False,
+            'is_window': False,
+            'all_materials': [],
+            'properties': {},
+            'representation_type': None
+        }
+        
+        try:
+            # TYPE DETECTION: Comprehensive element type classification
+            element_type = element.is_a()
+            metadata['element_type'] = element_type
+            
+            # Build type hierarchy (all parent types)
+            type_hierarchy = []
+            current_type = element_type
+            while current_type:
+                type_hierarchy.append(current_type)
+                try:
+                    # Get parent type from IFC schema
+                    parent_type = self.ifc_file.schema.declaration_by_name(current_type)
+                    if parent_type and hasattr(parent_type, 'supertype'):
+                        current_type = parent_type.supertype().name() if parent_type.supertype() else None
+                    else:
+                        break
+                except:
+                    break
+            metadata['element_type_hierarchy'] = type_hierarchy
+            
+            # ELEMENT IDENTIFICATION
+            if hasattr(element, 'Name') and element.Name:
+                metadata['element_name'] = str(element.Name)
+            if hasattr(element, 'GlobalId') and element.GlobalId:
+                metadata['element_global_id'] = str(element.GlobalId)
+            elif hasattr(element, 'id'):
+                metadata['element_global_id'] = f"#{element.id()}"
+            
+            # REPRESENTATION TYPE DETECTION
+            if hasattr(element, 'Representation') and element.Representation:
+                if hasattr(element.Representation, 'Representations'):
+                    representations = element.Representation.Representations
+                    if representations:
+                        # Get representation identifiers/types
+                        rep_types = []
+                        for rep in representations:
+                            if hasattr(rep, 'RepresentationIdentifier'):
+                                rep_id = rep.RepresentationIdentifier
+                                if rep_id:
+                                    rep_types.append(str(rep_id))
+                            if hasattr(rep, 'RepresentationType'):
+                                rep_type = rep.RepresentationType
+                                if rep_type:
+                                    rep_types.append(str(rep_type))
+                        if rep_types:
+                            metadata['representation_type'] = ', '.join(rep_types)
+            
+            # COLOR EXTRACTION: Use all available methods
+            # Method 1: From ifcopenshell shape (most reliable)
+            color_from_shape = None
+            if shape:
+                try:
+                    if hasattr(shape, 'styles') and shape.styles:
+                        for style in shape.styles:
+                            if hasattr(style, 'SurfaceColour') and style.SurfaceColour:
+                                colour = style.SurfaceColour
+                                if hasattr(colour, 'ColourComponents'):
+                                    components = colour.ColourComponents
+                                    if len(components) >= 3:
+                                        color_from_shape = (
+                                            float(components[0]),
+                                            float(components[1]),
+                                            float(components[2])
+                                        )
+                                        break
+                                elif hasattr(colour, 'Red') and hasattr(colour, 'Green') and hasattr(colour, 'Blue'):
+                                    color_from_shape = (
+                                        float(colour.Red),
+                                        float(colour.Green),
+                                        float(colour.Blue)
+                                    )
+                                    break
+                except Exception as e:
+                    logger.debug(f"Error extracting color from shape: {e}")
+            
+            # Method 2: Comprehensive color/style extraction from element
+            color_style = self._extract_color_and_style(element)
+            if color_style:
+                metadata['color_style'] = color_style
+                # If we got color from shape but not from element, use shape color
+                if color_from_shape and 'color' not in color_style:
+                    color_style['color'] = color_from_shape
+                    color_style['color_source'] = 'ifcopenshell_shape'
+                elif color_from_shape:
+                    # Shape color takes priority
+                    color_style['color'] = color_from_shape
+                    color_style['color_source'] = 'ifcopenshell_shape'
+            elif color_from_shape:
+                # Only shape color available
+                metadata['color_style'] = {
+                    'color': color_from_shape,
+                    'color_source': 'ifcopenshell_shape'
+                }
+            
+            # Method 3: Window-specific color extraction
+            if element_type == "IfcWindow" and not metadata['color_style'].get('color'):
+                window_color = self._extract_window_specific_color(element)
+                if window_color and 'color' in window_color:
+                    metadata['color_style'].update(window_color)
+                    metadata['color_style']['color_source'] = 'window_specific'
+            
+            # MATERIAL EXTRACTION: Comprehensive material properties
+            material_props = self._extract_material_properties(element)
+            if material_props:
+                metadata['material_properties'] = material_props
+                metadata['material_name'] = material_props.get('name')
+                metadata['material_type'] = material_props.get('type')
+                metadata['has_glazing'] = material_props.get('has_glazing', False)
+                metadata['is_window_material'] = material_props.get('is_window_material', False)
+                
+                if 'all_materials' in material_props:
+                    metadata['all_materials'] = material_props['all_materials']
+                
+                # Extract color from material if not already found
+                if 'color_style' in material_props and not metadata['color_style'].get('color'):
+                    mat_color_style = material_props['color_style']
+                    if mat_color_style and 'color' in mat_color_style:
+                        metadata['color_style'].update(mat_color_style)
+                        metadata['color_style']['color_source'] = 'material'
+            
+            # WINDOW DETECTION: Comprehensive window identification
+            if element_type == "IfcWindow":
+                metadata['is_window'] = True
+            elif element_type == "IfcPlate":
+                # Check if plate is glazing
+                plate_name = metadata.get('element_name', '').lower()
+                if (metadata.get('has_glazing') or 
+                    any(kw in plate_name for kw in ['glass', 'glazing', 'verre', 'стекло', 'vitrage', 'pane', 'window', 'окно'])):
+                    metadata['is_window'] = True
+            elif element_type == "IfcOpeningElement":
+                # Check if opening is for window (not door)
+                opening_name = metadata.get('element_name', '').lower()
+                if opening_name:
+                    if not any(kw in opening_name for kw in ['door', 'дверь', 'porte', 'tür', 'entrance']):
+                        metadata['is_window'] = True
+                else:
+                    # Default: treat as window if no door keywords
+                    metadata['is_window'] = True
+            
+            # PROPERTIES EXTRACTION: Get element properties
+            try:
+                if hasattr(element, 'IsDefinedBy'):
+                    for prop_def in element.IsDefinedBy:
+                        if prop_def.is_a("IfcRelDefinesByProperties"):
+                            if hasattr(prop_def, 'RelatingPropertyDefinition'):
+                                prop_set = prop_def.RelatingPropertyDefinition
+                                if prop_set.is_a("IfcPropertySet"):
+                                    if hasattr(prop_set, 'HasProperties'):
+                                        for prop in prop_set.HasProperties:
+                                            if hasattr(prop, 'Name'):
+                                                prop_name = prop.Name
+                                                if prop.is_a("IfcPropertySingleValue"):
+                                                    if hasattr(prop, 'NominalValue') and prop.NominalValue:
+                                                        prop_value = prop.NominalValue
+                                                        if hasattr(prop_value, 'wrappedValue'):
+                                                            metadata['properties'][prop_name] = prop_value.wrappedValue
+                                                        else:
+                                                            metadata['properties'][prop_name] = prop_value
+            except Exception as e:
+                logger.debug(f"Error extracting properties: {e}")
+            
+            # Note: Metadata storage in mesh happens after mesh creation
+            # This method only extracts metadata, doesn't store it
+            
+        except Exception as e:
+            logger.warning(f"Error extracting comprehensive metadata for element {element.id()}: {e}", exc_info=True)
+        
+        return metadata
+    
     @staticmethod
     def color_to_rgb(color_tuple: Tuple[float, float, float]) -> Tuple[int, int, int]:
         """
@@ -2688,171 +3287,323 @@ class IFCImporter(BaseImporter):
             return None
         
         try:
-            logger.info("Generating 3D mesh from IFC geometry...")
+            logger.info("=" * 80)
+            logger.info("Generating 3D mesh from IFC geometry - COMPREHENSIVE EXTRACTION")
+            logger.info("=" * 80)
             meshes = []
             
-            # Get all building elements that have geometry
-            # Note: Process windows FIRST to ensure they get proper color extraction and transparency
-            # CRITICAL: Also process ALL other element types to ensure complete visualization
-            element_types = [
-                "IfcWindow",  # Process windows first for better color extraction
-                "IfcOpeningElement",  # Openings often contain windows (process early for transparency)
-                "IfcPlate",  # Glazing panels (process early for transparency)
-                "IfcWall",
-                "IfcWallStandardCase",
-                "IfcSlab",  # Floors/ceilings
-                "IfcRoof",
-                "IfcSpace",  # Rooms
-                "IfcColumn",
-                "IfcBeam",
-                "IfcDoor",
-                "IfcStair",  # Stairs
-                "IfcRailing",  # Railings
-                "IfcCurtainWall",  # Curtain walls
-                "IfcBuildingElementProxy",  # Generic building elements
-                "IfcMember",  # Structural members
-                "IfcCovering",  # Coverings (flooring, cladding, etc.)
-                "IfcFooting",  # Foundations
-                "IfcPile",  # Piles
-                "IfcChimney",  # Chimneys
-                "IfcBuildingElementPart",  # Building element parts
-                "IfcDiscreteAccessory",  # Accessories
-                "IfcFastener",  # Fasteners
-                "IfcMechanicalFastener",  # Mechanical fasteners
-            ]
-            
-            # ALSO: Process ALL other elements that might have geometry
-            # This ensures we don't miss any geometry
-            logger.info("Processing all IFC element types for complete visualization...")
+            # CRITICAL IMPROVEMENT: Process ALL IfcProduct elements directly
+            # IfcProduct is the base class for ALL spatial/geometric elements in IFC
+            # This ensures we capture EVERY element with geometry, regardless of type
+            logger.info("Processing ALL IfcProduct elements for complete visualization...")
+            logger.info("This includes: walls, windows, doors, slabs, roofs, columns, beams,")
+            logger.info("  stairs, railings, spaces, openings, plates, and ALL other geometric elements")
             
             settings = geom.settings()
-            # Use world coordinates
+            
+            # CRITICAL: Configure settings for maximum accuracy and completeness
+            # Use world coordinates (ensures all geometry is in global coordinate system)
             try:
                 if hasattr(settings, 'USE_WORLD_COORDS'):
                     settings.set(settings.USE_WORLD_COORDS, True)
-            except:
-                pass
+                    logger.info("✓ World coordinates enabled (all transformations applied)")
+            except Exception as e:
+                logger.warning(f"Could not enable world coordinates: {e}")
             
             # Configure settings for better geometry and color extraction
             try:
-                # Enable BREP data for better geometry quality
+                # Enable BREP data for better geometry quality (more accurate representation)
                 if hasattr(settings, 'USE_BREP_DATA'):
                     settings.set(settings.USE_BREP_DATA, True)
-                # Disable Python OpenCASCADE if causing issues (use C++ version)
+                    logger.debug("✓ BREP data enabled")
+                
+                # Disable Python OpenCASCADE if causing issues (use C++ version for better performance)
                 if hasattr(settings, 'USE_PYTHON_OPENCASCADE'):
                     settings.set(settings.USE_PYTHON_OPENCASCADE, False)
-                # Enable edge colors if available
+                    logger.debug("✓ Using C++ OpenCASCADE (better performance)")
+                
+                # Enable shell sewing for better geometry quality
                 if hasattr(settings, 'SEW_SHELLS'):
                     settings.set(settings.SEW_SHELLS, True)
-            except:
-                pass
+                    logger.debug("✓ Shell sewing enabled")
+                
+                # Enable edge colors if available
+                if hasattr(settings, 'DISABLE_OPENING_SUBTRACTION'):
+                    # Don't disable opening subtraction - we want accurate geometry
+                    settings.set(settings.DISABLE_OPENING_SUBTRACTION, False)
+                    logger.debug("✓ Opening subtraction enabled (accurate geometry)")
+                
+                # Enable material extraction
+                if hasattr(settings, 'USE_MATERIAL_COLOR'):
+                    settings.set(settings.USE_MATERIAL_COLOR, True)
+                    logger.debug("✓ Material color extraction enabled")
+                
+                # Disable vertex welding for more accurate geometry (preserve all vertices)
+                if hasattr(settings, 'WELD_VERTICES'):
+                    settings.set(settings.WELD_VERTICES, False)
+                    logger.debug("✓ Vertex welding disabled (preserve all vertices)")
+            except Exception as e:
+                logger.debug(f"Some geometry settings could not be configured: {e}")
             
-            logger.info("IFC geometry settings configured for color extraction")
+            logger.info("IFC geometry settings configured for maximum accuracy and completeness")
             
-            total_elements = 0
-            successful_elements = 0
+            # CRITICAL: Get ALL IfcProduct elements including nested/aggregated parts
+            # This ensures we capture EVERY geometric element, including:
+            # - Main elements (walls, windows, doors, etc.)
+            # - Building element parts (IfcBuildingElementPart)
+            # - Element assemblies (IfcElementAssembly)
+            # - Aggregated elements (via IfcRelAggregates)
+            all_products = []
+            processed_ids = set()  # Track processed elements to avoid duplicates
             
-            for element_type in element_types:
+            try:
+                # Get all IfcProduct elements (base class for all geometric elements)
+                base_products = self.ifc_file.by_type("IfcProduct")
+                logger.info(f"Found {len(base_products)} base IfcProduct element(s)")
+                
+                # Add all base products
+                for product in base_products:
+                    product_id = product.id()
+                    if product_id not in processed_ids:
+                        all_products.append(product)
+                        processed_ids.add(product_id)
+                
+                # CRITICAL: Also get all building element parts and assemblies
+                # These are often nested and might be missed
                 try:
-                    elements = self.ifc_file.by_type(element_type)
-                    total_elements += len(elements)
-                    if len(elements) > 0:
-                        logger.debug(f"Processing {len(elements)} {element_type} element(s)...")
+                    parts = self.ifc_file.by_type("IfcBuildingElementPart")
+                    logger.info(f"Found {len(parts)} IfcBuildingElementPart element(s)")
+                    for part in parts:
+                        part_id = part.id()
+                        if part_id not in processed_ids:
+                            all_products.append(part)
+                            processed_ids.add(part_id)
+                except:
+                    pass
+                
+                try:
+                    assemblies = self.ifc_file.by_type("IfcElementAssembly")
+                    logger.info(f"Found {len(assemblies)} IfcElementAssembly element(s)")
+                    for assembly in assemblies:
+                        assembly_id = assembly.id()
+                        if assembly_id not in processed_ids:
+                            all_products.append(assembly)
+                            processed_ids.add(assembly_id)
+                except:
+                    pass
+                
+                # CRITICAL: Process aggregation relationships (IfcRelAggregates)
+                # Elements can be aggregated (parent-child relationships)
+                # We need to process both parent and children
+                try:
+                    aggregations = self.ifc_file.by_type("IfcRelAggregates")
+                    logger.info(f"Found {len(aggregations)} IfcRelAggregates relationship(s)")
+                    for agg_rel in aggregations:
+                        # Process related objects (children)
+                        if hasattr(agg_rel, 'RelatedObjects'):
+                            for related_obj in agg_rel.RelatedObjects:
+                                if related_obj.is_a("IfcProduct"):
+                                    related_id = related_obj.id()
+                                    if related_id not in processed_ids:
+                                        all_products.append(related_obj)
+                                        processed_ids.add(related_id)
+                                        logger.debug(f"Added aggregated element: {related_obj.is_a()} {related_id}")
+                except Exception as e:
+                    logger.debug(f"Could not process aggregations: {e}")
+                
+                logger.info(f"Total unique elements to process: {len(all_products)}")
+                
+            except Exception as e:
+                logger.warning(f"Could not get all IfcProduct elements: {e}")
+                # Fallback: try getting elements by common types
+                logger.info("Falling back to processing specific element types...")
+                all_products = []
+                for element_type in ["IfcWindow", "IfcWall", "IfcSlab", "IfcDoor", "IfcColumn", 
+                                     "IfcBeam", "IfcRoof", "IfcStair", "IfcSpace", "IfcOpeningElement",
+                                     "IfcPlate", "IfcRailing", "IfcCurtainWall", "IfcBuildingElementProxy",
+                                     "IfcBuildingElementPart", "IfcElementAssembly"]:
+                    try:
+                        elements = self.ifc_file.by_type(element_type)
+                        all_products.extend(elements)
+                    except:
+                        continue
+                logger.info(f"Fallback found {len(all_products)} elements")
+            
+            total_elements = len(all_products)
+            successful_elements = 0
+            failed_elements = 0
+            skipped_elements = 0
+            element_type_counts = {}  # Track counts by type
+            
+            logger.info(f"Processing {total_elements} elements for geometry extraction...")
+            
+            # Process each element
+            for idx, element in enumerate(all_products):
+                element_type = element.is_a()
+                element_type_counts[element_type] = element_type_counts.get(element_type, 0) + 1
+                
+                # Log progress every 100 elements
+                if (idx + 1) % 100 == 0:
+                    logger.info(f"Progress: {idx + 1}/{total_elements} elements processed ({successful_elements} successful, {failed_elements} failed, {skipped_elements} skipped)")
+                
+                try:
+                    # CRITICAL: Create shape from element with comprehensive representation handling
+                    # IFC elements can have multiple representations:
+                    # - Body (3D solid geometry) - PRIMARY
+                    # - Axis (centerline/axis representation)
+                    # - Box (bounding box)
+                    # - Curve (2D curve representation)
+                    # - FootPrint (footprint/plan view)
+                    # - Surface (surface representation)
+                    # We try ALL representations to ensure we get geometry
+                    shape = None
+                    representation_index = 0
+                    max_representations = 10  # Try up to 10 different representations
+                    representation_types = []  # Track which representations we tried
                     
-                    for element in elements:
+                    while shape is None and representation_index < max_representations:
                         try:
-                            # Create shape from element
-                            try:
+                            # Try creating shape with specific representation index
+                            if representation_index == 0:
+                                # First try: default representation (usually Body)
                                 shape = geom.create_shape(settings, element)
-                                if not shape:
-                                    logger.debug(f"Could not create shape for {element_type} {element.id()}")
-                                    continue
-                            except Exception as shape_error:
-                                logger.debug(f"Error creating shape for {element_type} {element.id()}: {shape_error}")
-                                continue
-                            
-                            # Get geometry from shape
-                            try:
-                                geometry = shape.geometry
-                                if not geometry:
-                                    logger.debug(f"No geometry in shape for {element_type} {element.id()}")
-                                    continue
-                            except Exception as geom_error:
-                                logger.debug(f"Error accessing geometry for {element_type} {element.id()}: {geom_error}")
-                                continue
-                            
-                            # Convert ifcopenshell geometry to trimesh
-                            # Standard ifcopenshell API: geometry.verts and geometry.faces
-                            try:
-                                vertices = None
-                                faces = None
-                                
-                                # Primary method: Use ifcopenshell tessellation (most reliable)
-                                # This is the recommended way to extract geometry
+                                representation_types.append("default")
+                            else:
+                                # Try other representations explicitly
                                 try:
-                                    # Try tessellation method first (most reliable)
-                                    if hasattr(geometry, 'tessellation'):
+                                    shape = geom.create_shape(settings, element, representation_index)
+                                    representation_types.append(f"repr_{representation_index}")
+                                except Exception as repr_error:
+                                    # If representation index doesn't exist, try next
+                                    representation_index += 1
+                                    continue
+                            
+                            # Validate shape has geometry
+                            if shape and hasattr(shape, 'geometry') and shape.geometry:
+                                # Check if geometry has valid data
+                                geometry = shape.geometry
+                                has_valid_data = False
+                                
+                                # Check for vertices/faces
+                                if hasattr(geometry, 'verts') and hasattr(geometry, 'faces'):
+                                    if len(geometry.verts) > 0 and len(geometry.faces) > 0:
+                                        has_valid_data = True
+                                elif hasattr(geometry, 'tessellation'):
+                                    try:
                                         tess = geometry.tessellation()
                                         if tess and isinstance(tess, tuple) and len(tess) >= 2:
-                                            vertices = np.array(tess[0], dtype=np.float64)
-                                            faces_data = tess[1]
-                                            faces = np.array(faces_data, dtype=np.int32)
-                                            if len(faces.shape) == 1 and len(faces) % 3 == 0:
-                                                faces = faces.reshape(-1, 3)
-                                            logger.debug(f"Extracted geometry using tessellation() for {element_type} {element.id()}")
-                                except Exception as tess_error:
-                                    logger.debug(f"Tessellation method failed: {tess_error}")
+                                            if len(tess[0]) > 0 and len(tess[1]) > 0:
+                                                has_valid_data = True
+                                    except:
+                                        pass
                                 
-                                # Method 1b: Direct access to geometry.verts and geometry.faces
-                                # This is the standard ifcopenshell API
-                                if (vertices is None or faces is None) and hasattr(geometry, 'verts') and hasattr(geometry, 'faces'):
-                                    try:
-                                        verts = geometry.verts
-                                        faces_data = geometry.faces
-                                        
-                                        # Convert to numpy arrays
-                                        vertices = np.array(verts, dtype=np.float64)
-                                        # Ensure vertices are in shape (n, 3)
-                                        if len(vertices.shape) == 1:
-                                            if len(vertices) % 3 == 0:
-                                                vertices = vertices.reshape(-1, 3)
-                                            else:
-                                                logger.debug(f"Invalid vertex count: {len(vertices)} (not divisible by 3)")
-                                                continue
-                                        elif len(vertices.shape) == 2 and vertices.shape[1] != 3:
-                                            logger.debug(f"Invalid vertex shape: {vertices.shape}")
-                                            continue
-                                        
-                                        faces = np.array(faces_data, dtype=np.int32)
-                                        # Ensure faces are in shape (n, 3)
-                                        if len(faces.shape) == 1:
-                                            if len(faces) % 3 == 0:
-                                                faces = faces.reshape(-1, 3)
-                                            else:
-                                                logger.debug(f"Invalid face count: {len(faces)} (not divisible by 3)")
-                                                continue
-                                        elif len(faces.shape) == 2 and faces.shape[1] != 3:
-                                            logger.debug(f"Invalid face shape: {faces.shape}")
-                                            continue
-                                        
-                                        # Validate data
-                                        if len(vertices) == 0 or len(faces) == 0:
-                                            logger.debug(f"Empty geometry: {len(vertices)} vertices, {len(faces)} faces")
-                                            continue
-                                        
-                                        # Check face indices are valid
-                                        if len(faces) > 0:
-                                            max_vertex_idx = np.max(faces)
-                                            if max_vertex_idx >= len(vertices):
-                                                logger.debug(f"Face indices out of range: max index {max_vertex_idx}, but only {len(vertices)} vertices")
-                                                continue
-                                    except Exception as e:
-                                        logger.debug(f"Failed to extract geometry using standard API: {e}")
+                                if has_valid_data:
+                                    logger.debug(f"✓ Created shape for {element_type} {element.id()} using {representation_types[-1]}")
+                                    break
+                                else:
+                                    # Shape exists but has no valid geometry, try next representation
+                                    shape = None
+                                    representation_index += 1
+                            else:
+                                shape = None
+                                representation_index += 1
+                        except Exception as shape_error:
+                            # Try next representation
+                            shape = None
+                            representation_index += 1
+                            if representation_index >= max_representations:
+                                logger.debug(f"Could not create shape for {element_type} {element.id()} after {max_representations} attempts: {shape_error}")
+                                skipped_elements += 1
+                                break
+                    
+                    if shape is None:
+                        logger.debug(f"No valid shape found for {element_type} {element.id()} (tried {len(representation_types)} representations)")
+                        continue
+                            
+                    # Get geometry from shape
+                    try:
+                        geometry = shape.geometry
+                        if not geometry:
+                            logger.debug(f"No geometry in shape for {element_type} {element.id()}")
+                            skipped_elements += 1
+                            continue
+                    except Exception as geom_error:
+                        logger.debug(f"Error accessing geometry for {element_type} {element.id()}: {geom_error}")
+                        failed_elements += 1
+                        continue
+                            
+                    # Convert ifcopenshell geometry to trimesh
+                    # Use multiple methods to ensure we extract geometry successfully
+                    vertices = None
+                    faces = None
+                    
+                    # Method 1: Use ifcopenshell tessellation (most reliable and recommended)
+                    try:
+                        if hasattr(geometry, 'tessellation'):
+                            tess = geometry.tessellation()
+                            if tess and isinstance(tess, tuple) and len(tess) >= 2:
+                                vertices = np.array(tess[0], dtype=np.float64)
+                                faces_data = tess[1]
+                                faces = np.array(faces_data, dtype=np.int32)
+                                if len(faces.shape) == 1 and len(faces) % 3 == 0:
+                                    faces = faces.reshape(-1, 3)
+                                logger.debug(f"✓ Extracted geometry using tessellation() for {element_type} {element.id()}")
+                    except Exception as tess_error:
+                        logger.debug(f"Tessellation method failed for {element_type} {element.id()}: {tess_error}")
+                                
+                    # Method 2: Direct access to geometry.verts and geometry.faces (standard ifcopenshell API)
+                    if (vertices is None or faces is None) and hasattr(geometry, 'verts') and hasattr(geometry, 'faces'):
+                        try:
+                            verts = geometry.verts
+                            faces_data = geometry.faces
+                            
+                            # Convert to numpy arrays
+                            vertices = np.array(verts, dtype=np.float64)
+                            # Ensure vertices are in shape (n, 3)
+                            if len(vertices.shape) == 1:
+                                if len(vertices) % 3 == 0:
+                                    vertices = vertices.reshape(-1, 3)
+                                else:
+                                    logger.debug(f"Invalid vertex count for {element_type} {element.id()}: {len(vertices)} (not divisible by 3)")
+                                    vertices = None
+                            elif len(vertices.shape) == 2 and vertices.shape[1] != 3:
+                                logger.debug(f"Invalid vertex shape for {element_type} {element.id()}: {vertices.shape}")
+                                vertices = None
+                            
+                            if vertices is not None:
+                                faces = np.array(faces_data, dtype=np.int32)
+                                # Ensure faces are in shape (n, 3)
+                                if len(faces.shape) == 1:
+                                    if len(faces) % 3 == 0:
+                                        faces = faces.reshape(-1, 3)
+                                    else:
+                                        logger.debug(f"Invalid face count for {element_type} {element.id()}: {len(faces)} (not divisible by 3)")
+                                        faces = None
+                                elif len(faces.shape) == 2 and faces.shape[1] != 3:
+                                    logger.debug(f"Invalid face shape for {element_type} {element.id()}: {faces.shape}")
+                                    faces = None
+                                
+                                # Validate data
+                                if vertices is not None and faces is not None:
+                                    if len(vertices) == 0 or len(faces) == 0:
+                                        logger.debug(f"Empty geometry for {element_type} {element.id()}: {len(vertices)} vertices, {len(faces)} faces")
                                         vertices = None
                                         faces = None
+                                    elif len(faces) > 0:
+                                        max_vertex_idx = np.max(faces)
+                                        if max_vertex_idx >= len(vertices):
+                                            logger.debug(f"Face indices out of range for {element_type} {element.id()}: max index {max_vertex_idx}, but only {len(vertices)} vertices")
+                                            vertices = None
+                                            faces = None
+                                        else:
+                                            logger.debug(f"✓ Extracted geometry using verts/faces for {element_type} {element.id()}")
+                        except Exception as e:
+                            logger.debug(f"Failed to extract geometry using standard API for {element_type} {element.id()}: {e}")
+                            vertices = None
+                            faces = None
                                 
-                                # Method 2: Use shape's geometry data directly
-                                if vertices is None or faces is None:
+                    # Method 3: Use shape's geometry data directly (fallback)
+                    if vertices is None or faces is None:
                                     try:
                                         # Try accessing shape's geometry data
                                         # ifcopenshell shape has geometry with id() method
@@ -2896,387 +3647,508 @@ class IFCImporter(BaseImporter):
                                     except Exception as e:
                                         logger.debug(f"Shape geometry method failed: {e}")
                                 
-                                # Method 3: Try accessing geometry data directly
-                                if vertices is None or faces is None:
-                                    try:
-                                        # Some versions store data differently
-                                        if hasattr(geometry, 'data'):
-                                            data = geometry.data
-                                            if hasattr(data, 'verts') and hasattr(data, 'faces'):
-                                                vertices = np.array(data.verts, dtype=np.float64)
-                                                faces_data = data.faces
-                                                faces = np.array(faces_data, dtype=np.int32)
-                                                if len(faces.shape) == 1 and len(faces) % 3 == 0:
-                                                    faces = faces.reshape(-1, 3)
-                                    except Exception as e:
-                                        logger.debug(f"Data access method failed: {e}")
+                    # Method 4: Try accessing geometry data directly (last resort)
+                    if vertices is None or faces is None:
+                        try:
+                            # Some versions store data differently
+                            if hasattr(geometry, 'data'):
+                                data = geometry.data
+                                if hasattr(data, 'verts') and hasattr(data, 'faces'):
+                                    vertices = np.array(data.verts, dtype=np.float64)
+                                    faces_data = data.faces
+                                    faces = np.array(faces_data, dtype=np.int32)
+                                    if len(faces.shape) == 1 and len(faces) % 3 == 0:
+                                        faces = faces.reshape(-1, 3)
+                                    logger.debug(f"✓ Extracted geometry using data.verts/faces for {element_type} {element.id()}")
+                        except Exception as e:
+                            logger.debug(f"Data access method failed for {element_type} {element.id()}: {e}")
+                    
+                    # Create mesh if we have valid data
+                    if vertices is not None and faces is not None and len(vertices) > 0 and len(faces) > 0:
+                        try:
+                            # CRITICAL: Validate and clean geometry before creating mesh
+                            # Remove invalid faces (faces with out-of-range indices)
+                            if len(faces) > 0:
+                                max_vertex_idx = np.max(faces)
+                                if max_vertex_idx >= len(vertices):
+                                    # Filter out invalid faces
+                                    valid_faces = []
+                                    for face in faces:
+                                        if all(0 <= idx < len(vertices) for idx in face):
+                                            valid_faces.append(face)
+                                    if len(valid_faces) > 0:
+                                        faces = np.array(valid_faces, dtype=np.int32)
+                                    else:
+                                        logger.debug(f"All faces invalid for {element_type} {element.id()}")
+                                        skipped_elements += 1
+                                        continue
+                            
+                            # Create mesh
+                            mesh = trimesh.Trimesh(vertices=vertices, faces=faces)
+                            
+                            # CRITICAL: Validate and clean the created mesh
+                            if len(mesh.vertices) > 0 and len(mesh.faces) > 0:
+                                # Remove degenerate faces (zero area)
+                                try:
+                                    # Calculate face areas
+                                    face_areas = mesh.area_faces
+                                    if len(face_areas) > 0:
+                                        # Remove faces with very small area (degenerate)
+                                        min_area = 1e-10  # Very small threshold
+                                        valid_mask = face_areas > min_area
+                                        if np.any(valid_mask):
+                                            if not np.all(valid_mask):
+                                                # Some faces are degenerate, remove them
+                                                mesh.update_faces(valid_mask)
+                                                logger.debug(f"Removed {np.sum(~valid_mask)} degenerate faces from {element_type} {element.id()}")
+                                except:
+                                    # If area calculation fails, continue anyway
+                                    pass
                                 
-                                # Create mesh if we have valid data
-                                if vertices is not None and faces is not None and len(vertices) > 0 and len(faces) > 0:
+                                # Ensure mesh is valid
+                                if len(mesh.vertices) > 0 and len(mesh.faces) > 0:
+                                    # COMPREHENSIVE METADATA EXTRACTION: Type, Color, Material
+                                    # Extract metadata BEFORE applying colors (metadata extraction uses element, not mesh)
+                                    element_metadata = self._extract_comprehensive_element_metadata(element, shape)
+                                    
+                                    # Extract and apply color/style from IFC element
+                                    color_style = element_metadata.get('color_style', {})
+                                    
+                                    # Method 1: Try extracting from ifcopenshell shape (most reliable)
+                                    # ifcopenshell may have already extracted colors during shape creation
+                                    color_from_shape = None
                                     try:
-                                        mesh = trimesh.Trimesh(vertices=vertices, faces=faces)
-                                        # Validate the created mesh
-                                        if len(mesh.vertices) > 0 and len(mesh.faces) > 0:
-                                            # Extract and apply color/style from IFC element
-                                            try:
-                                                color_style = {}
+                                        # Check if shape has styles attribute (list of styles)
+                                        if hasattr(shape, 'styles') and shape.styles:
+                                            for style in shape.styles:
+                                                # Try SurfaceColour (IFC4)
+                                                if hasattr(style, 'SurfaceColour') and style.SurfaceColour:
+                                                    colour = style.SurfaceColour
+                                                    if hasattr(colour, 'ColourComponents'):
+                                                        components = colour.ColourComponents
+                                                        if len(components) >= 3:
+                                                            color_from_shape = (
+                                                                float(components[0]),
+                                                                float(components[1]),
+                                                                float(components[2])
+                                                            )
+                                                            logger.debug(f"Extracted color from ifcopenshell shape.styles for {element_type} {element.id()}: {color_from_shape}")
+                                                            break
+                                                    # Try Red/Green/Blue (IFC2X3)
+                                                    if not color_from_shape and hasattr(colour, 'Red') and hasattr(colour, 'Green') and hasattr(colour, 'Blue'):
+                                                        color_from_shape = (
+                                                            float(colour.Red),
+                                                            float(colour.Green),
+                                                            float(colour.Blue)
+                                                        )
+                                                        logger.debug(f"Extracted color from ifcopenshell shape.styles (IFC2X3) for {element_type} {element.id()}")
+                                                        break
                                                 
-                                                # Method 1: Try extracting from ifcopenshell shape (most reliable)
-                                                # ifcopenshell may have already extracted colors during shape creation
-                                                color_from_shape = None
-                                                try:
-                                                    # Check if shape has styles attribute (list of styles)
-                                                    if hasattr(shape, 'styles') and shape.styles:
-                                                        for style in shape.styles:
-                                                            # Try SurfaceColour (IFC4)
-                                                            if hasattr(style, 'SurfaceColour') and style.SurfaceColour:
-                                                                colour = style.SurfaceColour
-                                                                if hasattr(colour, 'ColourComponents'):
-                                                                    components = colour.ColourComponents
+                                                # Try to extract from style's internal structure
+                                                if not color_from_shape:
+                                                    # Some styles have colors in different attributes
+                                                    for attr_name in ['DiffuseColour', 'SurfaceColour', 'Colour']:
+                                                        if hasattr(style, attr_name):
+                                                            color_obj = getattr(style, attr_name)
+                                                            if color_obj:
+                                                                if hasattr(color_obj, 'ColourComponents'):
+                                                                    components = color_obj.ColourComponents
                                                                     if len(components) >= 3:
                                                                         color_from_shape = (
                                                                             float(components[0]),
                                                                             float(components[1]),
                                                                             float(components[2])
                                                                         )
-                                                                        logger.debug(f"Extracted color from ifcopenshell shape.styles for {element_type} {element.id()}: {color_from_shape}")
+                                                                        logger.debug(f"Extracted color from style.{attr_name} for {element_type} {element.id()}")
                                                                         break
-                                                                # Try Red/Green/Blue (IFC2X3)
-                                                                elif hasattr(colour, 'Red') and hasattr(colour, 'Green') and hasattr(colour, 'Blue'):
+                                                                elif hasattr(color_obj, 'Red'):
                                                                     color_from_shape = (
-                                                                        float(colour.Red),
-                                                                        float(colour.Green),
-                                                                        float(colour.Blue)
+                                                                        float(color_obj.Red),
+                                                                        float(color_obj.Green),
+                                                                        float(color_obj.Blue)
                                                                     )
-                                                                    logger.debug(f"Extracted color from ifcopenshell shape.styles (IFC2X3) for {element_type} {element.id()}")
+                                                                    logger.debug(f"Extracted color from style.{attr_name} (IFC2X3) for {element_type} {element.id()}")
                                                                     break
-                                                            
-                                                            # Try to extract from style's internal structure
-                                                            if not color_from_shape:
-                                                                # Some styles have colors in different attributes
-                                                                for attr_name in ['DiffuseColour', 'SurfaceColour', 'Colour']:
-                                                                    if hasattr(style, attr_name):
-                                                                        color_obj = getattr(style, attr_name)
-                                                                        if color_obj:
-                                                                            if hasattr(color_obj, 'ColourComponents'):
-                                                                                components = color_obj.ColourComponents
-                                                                                if len(components) >= 3:
-                                                                                    color_from_shape = (
-                                                                                        float(components[0]),
-                                                                                        float(components[1]),
-                                                                                        float(components[2])
-                                                                                    )
-                                                                                    logger.debug(f"Extracted color from style.{attr_name} for {element_type} {element.id()}")
-                                                                                    break
-                                                                            elif hasattr(color_obj, 'Red'):
-                                                                                color_from_shape = (
-                                                                                    float(color_obj.Red),
-                                                                                    float(color_obj.Green),
-                                                                                    float(color_obj.Blue)
-                                                                                )
-                                                                                logger.debug(f"Extracted color from style.{attr_name} (IFC2X3) for {element_type} {element.id()}")
-                                                                                break
-                                                                    if color_from_shape:
-                                                                        break
-                                                    
-                                                    # Alternative: Check if shape has material with color
-                                                    if not color_from_shape and hasattr(shape, 'material') and shape.material:
-                                                        material = shape.material
-                                                        # Try diffuse color first
-                                                        if hasattr(material, 'diffuse') and material.diffuse:
-                                                            diffuse = material.diffuse
-                                                            if len(diffuse) >= 3:
-                                                                r, g, b = diffuse[0], diffuse[1], diffuse[2]
-                                                                # Normalize to 0-1 range if needed
-                                                                if r > 1.0 or g > 1.0 or b > 1.0:
-                                                                    r, g, b = r/255.0, g/255.0, b/255.0
-                                                                color_from_shape = (float(r), float(g), float(b))
-                                                                logger.debug(f"Extracted color from shape.material.diffuse for {element_type} {element.id()}")
-                                                        
-                                                        # Try other material color attributes
-                                                        if not color_from_shape:
-                                                            for attr_name in ['ambient', 'specular', 'emissive']:
-                                                                if hasattr(material, attr_name):
-                                                                    color_attr = getattr(material, attr_name)
-                                                                    if color_attr and len(color_attr) >= 3:
-                                                                        r, g, b = color_attr[0], color_attr[1], color_attr[2]
-                                                                        if r > 1.0 or g > 1.0 or b > 1.0:
-                                                                            r, g, b = r/255.0, g/255.0, b/255.0
-                                                                        color_from_shape = (float(r), float(g), float(b))
-                                                                        logger.debug(f"Extracted color from shape.material.{attr_name} for {element_type} {element.id()}")
-                                                                        break
-                                                except Exception as e:
-                                                    logger.debug(f"Could not extract color from ifcopenshell shape for {element_type} {element.id()}: {e}")
-                                                
-                                                # Method 2: Extract from element representation/material (comprehensive extraction)
-                                                # This now includes 9 different extraction methods
-                                                if not color_from_shape:
-                                                    color_style = self._extract_color_and_style(element)
-                                                    if color_style and 'color' in color_style:
-                                                        color_from_shape = color_style['color']
-                                                        logger.debug(f"Extracted color from element representation for {element_type} {element.id()}")
-                                                
-                                                # Method 2b: For windows specifically, try additional window-specific extraction
-                                                if not color_from_shape and element_type == "IfcWindow":
-                                                    window_color = self._extract_window_specific_color(element)
-                                                    if window_color and 'color' in window_color:
-                                                        color_from_shape = window_color['color']
-                                                        color_style = window_color
-                                                        logger.debug(f"Extracted color using window-specific method for {element.id()}")
-                                                
-                                                # Method 2c: Check material properties for color (especially for windows)
-                                                if not color_from_shape:
-                                                    try:
-                                                        material_props = self._extract_material_properties(element)
-                                                        if material_props:
-                                                            # Check if material has color_style
-                                                            if 'color_style' in material_props:
-                                                                mat_color_style = material_props['color_style']
-                                                                if mat_color_style and 'color' in mat_color_style:
-                                                                    color_from_shape = mat_color_style['color']
-                                                                    color_style = mat_color_style
-                                                                    logger.debug(f"Extracted color from material properties for {element_type} {element.id()}")
-                                                            
-                                                            # Also check all_materials if multiple materials found
-                                                            if not color_from_shape and 'all_materials' in material_props:
-                                                                for mat in material_props['all_materials']:
-                                                                    if 'color_style' in mat and 'color' in mat['color_style']:
-                                                                        color_from_shape = mat['color_style']['color']
-                                                                        color_style = mat['color_style']
-                                                                        logger.debug(f"Extracted color from one of multiple materials for {element_type} {element.id()}")
-                                                                        break
-                                                    except Exception as e:
-                                                        logger.debug(f"Error checking material properties for color: {e}")
-                                                
-                                                # Method 3: Try extracting from ifcopenshell's material API (if available)
-                                                if not color_from_shape:
-                                                    try:
-                                                        # Some ifcopenshell versions expose material colors directly
-                                                        if hasattr(shape, 'material') and shape.material:
-                                                            material = shape.material
-                                                            # Check for various material color attributes
-                                                            for attr_name in ['diffuse', 'ambient', 'specular', 'emissive']:
-                                                                if hasattr(material, attr_name):
-                                                                    color_attr = getattr(material, attr_name)
-                                                                    if color_attr and len(color_attr) >= 3:
-                                                                        # Material colors might be in 0-1 or 0-255 range
-                                                                        r, g, b = color_attr[0], color_attr[1], color_attr[2]
-                                                                        # Normalize to 0-1 range if needed
-                                                                        if r > 1.0 or g > 1.0 or b > 1.0:
-                                                                            r, g, b = r/255.0, g/255.0, b/255.0
-                                                                        color_from_shape = (float(r), float(g), float(b))
-                                                                        logger.debug(f"Extracted color from shape material.{attr_name} for {element_type} {element.id()}")
-                                                                        break
-                                                    except Exception as e:
-                                                        logger.debug(f"Could not extract color from shape material API: {e}")
-                                                
-                                                # Apply color if found
-                                                if color_from_shape:
-                                                    # Use color from shape if available, otherwise use element color
-                                                    if not color_style or 'color' not in color_style:
-                                                        color_style = {'color': color_from_shape, 'style_type': 'from_shape'}
-                                                    
-                                                # Apply color to mesh
-                                                if color_style and 'color' in color_style:
-                                                    # Get color (IFC format: 0.0-1.0 range)
-                                                    r, g, b = color_style['color']
-                                                    
-                                                    # Get transparency (0.0 = opaque, 1.0 = fully transparent)
-                                                    transparency = color_style.get('transparency', 0.0)
-                                                    
-                                                    # For windows, ALWAYS apply transparency (windows should be transparent)
-                                                    is_window = False
-                                                    
-                                                    # Check if element is a window (comprehensive detection)
-                                                    if element_type == "IfcWindow":
-                                                        is_window = True
-                                                    elif element.is_a("IfcPlate"):
-                                                        # Check if plate is a glazing panel (window)
-                                                        # Method 1: Check material for glazing
-                                                        try:
-                                                            material_props = self._extract_material_properties(element)
-                                                            if material_props:
-                                                                if material_props.get('has_glazing') or material_props.get('is_window_material'):
-                                                                    is_window = True
-                                                                else:
-                                                                    material_name = material_props.get('name', '').lower() if material_props.get('name') else ''
-                                                                    if any(keyword in material_name for keyword in ['glass', 'glazing', 'verre', 'стекло', 'vitrage', 'pane']):
-                                                                        is_window = True
-                                                        except:
-                                                            pass
-                                                        
-                                                        # Method 2: Check name for window keywords
-                                                        if not is_window:
-                                                            plate_name = element.Name if hasattr(element, 'Name') else ''
-                                                            if plate_name:
-                                                                name_lower = plate_name.lower()
-                                                                if any(keyword in name_lower for keyword in ['window', 'окно', 'glazing', 'glass', 'pane', 'vitrage']):
-                                                                    is_window = True
-                                                        
-                                                        # Method 3: Check if plate has window-like geometry
-                                                        if not is_window:
-                                                            try:
-                                                                center, normal, size = self._extract_window_geometry(element)
-                                                                width, height = size
-                                                                # Windows are typically 0.3m - 3m in size
-                                                                if 0.3 <= width <= 3.0 and 0.3 <= height <= 3.0:
-                                                                    is_window = True
-                                                            except:
-                                                                pass
-                                                        
-                                                        # Default: If plate is in reasonable window size range, treat as window
-                                                        if not is_window:
-                                                            is_window = True  # AGGRESSIVE: Treat all plates as potential windows
-                                                            logger.debug(f"Treating IfcPlate {element.id()} as window (aggressive detection)")
-                                                    
-                                                    elif element.is_a("IfcOpeningElement"):
-                                                        # Check if opening is a window (not a door)
-                                                        # Method 1: Check if filled by door
-                                                        is_door = False
-                                                        if hasattr(element, 'HasFillings'):
-                                                            for filling_rel in element.HasFillings:
-                                                                if hasattr(filling_rel, 'RelatedBuildingElement'):
-                                                                    if filling_rel.RelatedBuildingElement.is_a("IfcDoor"):
-                                                                        is_door = True
-                                                                        break
-                                                        
-                                                        # Method 2: Check name
-                                                        if not is_door:
-                                                            opening_name = element.Name if hasattr(element, 'Name') else ''
-                                                            if opening_name:
-                                                                name_lower = opening_name.lower()
-                                                                if any(keyword in name_lower for keyword in ['door', 'дверь', 'porte', 'tür', 'entrance']):
-                                                                    is_door = True
-                                                        
-                                                        # If not a door, it's likely a window
-                                                        if not is_door:
-                                                            is_window = True
-                                                            logger.debug(f"Treating IfcOpeningElement {element.id()} as window")
-                                                    
-                                                    # Apply transparency to windows
-                                                    if is_window:
-                                                        # Check material for glass/glazing to determine transparency level
-                                                        try:
-                                                            material_props = self._extract_material_properties(element)
-                                                            if material_props:
-                                                                material_name = material_props.get('name', '').lower() if material_props.get('name') else ''
-                                                                has_glazing = material_props.get('has_glazing', False)
-                                                                
-                                                                # If material is glass/glazing, make it more transparent
-                                                                if has_glazing or any(keyword in material_name for keyword in ['glass', 'glazing', 'verre', 'стекло', 'vitrage']):
-                                                                    # Glass windows: 30-40% transparent (60-70% opaque)
-                                                                    transparency = 0.3
-                                                                    logger.debug(f"Applied high transparency to {element_type} {element.id()} (glass/glazing material)")
-                                                                else:
-                                                                    # Regular windows: 20% transparent (80% opaque)
-                                                                    transparency = 0.2
-                                                                    logger.debug(f"Applied transparency to {element_type} {element.id()} (window element)")
-                                                            else:
-                                                                # No material found, but it's a window - apply default transparency
-                                                                transparency = 0.25  # 25% transparent = 75% opaque
-                                                                logger.debug(f"Applied default transparency to {element_type} {element.id()} (window, no material)")
-                                                        except Exception as e:
-                                                            # Fallback: apply default transparency for windows
-                                                            transparency = 0.25
-                                                            logger.debug(f"Applied default transparency to {element_type} {element.id()} (window, error checking material: {e})")
-                                                    
-                                                    alpha = 1.0 - transparency  # Convert to alpha (1.0 = opaque)
-                                                    
-                                                    # Trimesh expects colors in 0-255 range for uint8 or 0.0-1.0 for float
-                                                    # Use 0-255 range (uint8) for better compatibility
-                                                    color_rgba = np.array([
-                                                        int(r * 255),
-                                                        int(g * 255),
-                                                        int(b * 255),
-                                                        int(alpha * 255)
-                                                    ], dtype=np.uint8)
-                                                    
-                                                    # Apply color to all faces (per-face coloring)
-                                                    num_faces = len(mesh.faces)
-                                                    face_colors = np.tile(color_rgba, (num_faces, 1))
-                                                    mesh.visual.face_colors = face_colors
-                                                    
-                                                    logger.debug(f"✓ Applied color to {element_type} {element.id()}: RGB({r*255:.0f}, {g*255:.0f}, {b*255:.0f}), alpha={alpha:.2f}")
-                                                else:
-                                                    # No color found - use default light gray
-                                                    # BUT: For windows, apply transparency even with default color
-                                                    is_window = False
-                                                    window_alpha = 255  # Default opaque
-                                                    
-                                                    # Check if element is a window
-                                                    if element_type == "IfcWindow":
-                                                        is_window = True
-                                                    elif element.is_a("IfcPlate"):
-                                                        # Check if plate is a glazing panel
-                                                        try:
-                                                            material_props = self._extract_material_properties(element)
-                                                            if material_props and (material_props.get('has_glazing') or material_props.get('is_window_material')):
-                                                                is_window = True
-                                                        except:
-                                                            pass
-                                                    elif element.is_a("IfcOpeningElement"):
-                                                        # Check if opening is a window (not a door)
-                                                        opening_name = element.Name if hasattr(element, 'Name') else ''
-                                                        if opening_name:
-                                                            name_lower = opening_name.lower()
-                                                            if not any(keyword in name_lower for keyword in ['door', 'дверь', 'porte', 'tür']):
-                                                                is_window = True
-                                                        else:
-                                                            is_window = True
-                                                    
-                                                    # Apply transparency to windows even with default color
-                                                    if is_window:
-                                                        # Windows should be semi-transparent (75% opaque = 25% transparent)
-                                                        window_alpha = int(255 * 0.75)  # 75% opacity
-                                                        logger.debug(f"Applied transparency to {element_type} {element.id()} (window with default color)")
-                                                    
-                                                    default_color = np.array([200, 200, 200, window_alpha], dtype=np.uint8)
-                                                    num_faces = len(mesh.faces)
-                                                    face_colors = np.tile(default_color, (num_faces, 1))
-                                                    mesh.visual.face_colors = face_colors
-                                                    
-                                                    # Log which element is missing color for debugging
-                                                    element_name = getattr(element, 'Name', 'Unnamed')
-                                                    element_id = getattr(element, 'GlobalId', element.id())
-                                                    if element_type == "IfcWindow" or is_window:
-                                                        logger.info(f"⚠ Window '{element_name}' (ID: {element_id}) has no color but transparency applied")
-                                                    else:
-                                                        logger.debug(f"⚠ No color found for {element_type} '{element_name}' (ID: {element_id}), using default gray")
-                                            except Exception as color_error:
-                                                logger.warning(f"Error applying color to {element_type} {element.id()}: {color_error}")
-                                                # Use default gray if color extraction fails
-                                                # BUT: For windows, apply transparency even on error
-                                                is_window = (element_type == "IfcWindow" or 
-                                                           element.is_a("IfcPlate") or 
-                                                           element.is_a("IfcOpeningElement"))
-                                                window_alpha = int(255 * 0.75) if is_window else 255  # 75% opacity for windows
-                                                default_color = np.array([200, 200, 200, window_alpha], dtype=np.uint8)
-                                                num_faces = len(mesh.faces)
-                                                face_colors = np.tile(default_color, (num_faces, 1))
-                                                mesh.visual.face_colors = face_colors
-                                                if is_window:
-                                                    logger.debug(f"Applied transparency to {element_type} {element.id()} (window, color extraction error)")
+                                                                if color_from_shape:
+                                                                    break
+                                        
+                                        # Alternative: Check if shape has material with color
+                                        if not color_from_shape and hasattr(shape, 'material') and shape.material:
+                                            material = shape.material
+                                            # Try diffuse color first
+                                            if hasattr(material, 'diffuse') and material.diffuse:
+                                                diffuse = material.diffuse
+                                                if len(diffuse) >= 3:
+                                                    r, g, b = diffuse[0], diffuse[1], diffuse[2]
+                                                    # Normalize to 0-1 range if needed
+                                                    if r > 1.0 or g > 1.0 or b > 1.0:
+                                                        r, g, b = r/255.0, g/255.0, b/255.0
+                                                    color_from_shape = (float(r), float(g), float(b))
+                                                    logger.debug(f"Extracted color from shape.material.diffuse for {element_type} {element.id()}")
                                             
-                                            meshes.append(mesh)
-                                            successful_elements += 1
+                                            # Try other material color attributes
+                                            if not color_from_shape:
+                                                for attr_name in ['ambient', 'specular', 'emissive']:
+                                                    if hasattr(material, attr_name):
+                                                        color_attr = getattr(material, attr_name)
+                                                        if color_attr and len(color_attr) >= 3:
+                                                            r, g, b = color_attr[0], color_attr[1], color_attr[2]
+                                                            if r > 1.0 or g > 1.0 or b > 1.0:
+                                                                r, g, b = r/255.0, g/255.0, b/255.0
+                                                            color_from_shape = (float(r), float(g), float(b))
+                                                            logger.debug(f"Extracted color from shape.material.{attr_name} for {element_type} {element.id()}")
+                                                            break
+                                    except Exception as e:
+                                        logger.debug(f"Could not extract color from ifcopenshell shape for {element_type} {element.id()}: {e}")
+                                    
+                                    # Method 2: Extract from element representation/material (comprehensive extraction)
+                                    # This now includes 9 different extraction methods
+                                    if not color_from_shape:
+                                        color_style = self._extract_color_and_style(element)
+                                        if color_style and 'color' in color_style:
+                                            color_from_shape = color_style['color']
+                                            logger.debug(f"Extracted color from element representation for {element_type} {element.id()}")
+                                    
+                                    # Method 2b: For windows specifically, try additional window-specific extraction
+                                    if not color_from_shape and element_type == "IfcWindow":
+                                        window_color = self._extract_window_specific_color(element)
+                                        if window_color and 'color' in window_color:
+                                            color_from_shape = window_color['color']
+                                            color_style = window_color
+                                            logger.debug(f"Extracted color using window-specific method for {element.id()}")
+                                    
+                                    # Method 2c: Check material properties for color (especially for windows)
+                                    if not color_from_shape:
+                                        try:
+                                            material_props = self._extract_material_properties(element)
+                                            if material_props:
+                                                # Check if material has color_style
+                                                if 'color_style' in material_props:
+                                                    mat_color_style = material_props['color_style']
+                                                    if mat_color_style and 'color' in mat_color_style:
+                                                        color_from_shape = mat_color_style['color']
+                                                        color_style = mat_color_style
+                                                        logger.debug(f"Extracted color from material properties for {element_type} {element.id()}")
+                                                
+                                                # Also check all_materials if multiple materials found
+                                                if not color_from_shape and 'all_materials' in material_props:
+                                                    for mat in material_props['all_materials']:
+                                                        if 'color_style' in mat and 'color' in mat['color_style']:
+                                                            color_from_shape = mat['color_style']['color']
+                                                            color_style = mat['color_style']
+                                                            logger.debug(f"Extracted color from one of multiple materials for {element_type} {element.id()}")
+                                                            break
+                                        except Exception as e:
+                                            logger.debug(f"Error checking material properties for color: {e}")
+                                    
+                                    # Method 3: Try extracting from ifcopenshell's material API (if available)
+                                    if not color_from_shape:
+                                        try:
+                                            # Some ifcopenshell versions expose material colors directly
+                                            if hasattr(shape, 'material') and shape.material:
+                                                material = shape.material
+                                                # Check for various material color attributes
+                                                for attr_name in ['diffuse', 'ambient', 'specular', 'emissive']:
+                                                    if hasattr(material, attr_name):
+                                                        color_attr = getattr(material, attr_name)
+                                                        if color_attr and len(color_attr) >= 3:
+                                                            # Material colors might be in 0-1 or 0-255 range
+                                                            r, g, b = color_attr[0], color_attr[1], color_attr[2]
+                                                            # Normalize to 0-1 range if needed
+                                                            if r > 1.0 or g > 1.0 or b > 1.0:
+                                                                r, g, b = r/255.0, g/255.0, b/255.0
+                                                            color_from_shape = (float(r), float(g), float(b))
+                                                            logger.debug(f"Extracted color from shape material.{attr_name} for {element_type} {element.id()}")
+                                                            break
+                                        except Exception as e:
+                                            logger.debug(f"Could not extract color from shape material API: {e}")
+                                    
+                                    # Apply color if found
+                                    if color_from_shape:
+                                        # Use color from shape if available, otherwise use element color
+                                        if not color_style or 'color' not in color_style:
+                                            color_style = {'color': color_from_shape, 'style_type': 'from_shape'}
+                                    
+                                    # Apply color to mesh
+                                    if color_style and 'color' in color_style:
+                                        # Get color (IFC format: 0.0-1.0 range)
+                                        r, g, b = color_style['color']
+                                    
+                                        # Get transparency (0.0 = opaque, 1.0 = fully transparent)
+                                        transparency = color_style.get('transparency', 0.0)
+                                        
+                                        # For windows, ALWAYS apply transparency (windows should be transparent)
+                                        is_window = False
+                                        
+                                        # Check if element is a window (comprehensive detection)
+                                        if element_type == "IfcWindow":
+                                            is_window = True
+                                        elif element.is_a("IfcPlate"):
+                                            # Check if plate is a glazing panel (window)
+                                            # Method 1: Check material for glazing
+                                            try:
+                                                material_props = self._extract_material_properties(element)
+                                                if material_props:
+                                                    if material_props.get('has_glazing') or material_props.get('is_window_material'):
+                                                        is_window = True
+                                                    else:
+                                                        material_name = material_props.get('name', '').lower() if material_props.get('name') else ''
+                                                        if any(keyword in material_name for keyword in ['glass', 'glazing', 'verre', 'стекло', 'vitrage', 'pane']):
+                                                            is_window = True
+                                            except:
+                                                pass
+                                            
+                                            # Method 2: Check name for window keywords
+                                            if not is_window:
+                                                plate_name = element.Name if hasattr(element, 'Name') else ''
+                                                if plate_name:
+                                                    name_lower = plate_name.lower()
+                                                    if any(keyword in name_lower for keyword in ['window', 'окно', 'glazing', 'glass', 'pane', 'vitrage']):
+                                                        is_window = True
+                                            
+                                            # Method 3: Check if plate has window-like geometry
+                                            if not is_window:
+                                                try:
+                                                    center, normal, size = self._extract_window_geometry(element)
+                                                    width, height = size
+                                                    # Windows are typically 0.3m - 3m in size
+                                                    if 0.3 <= width <= 3.0 and 0.3 <= height <= 3.0:
+                                                        is_window = True
+                                                except:
+                                                    pass
+                                            
+                                            # Default: If plate is in reasonable window size range, treat as window
+                                            if not is_window:
+                                                is_window = True  # AGGRESSIVE: Treat all plates as potential windows
+                                                logger.debug(f"Treating IfcPlate {element.id()} as window (aggressive detection)")
+                                        
+                                        elif element.is_a("IfcOpeningElement"):
+                                            # Check if opening is a window (not a door)
+                                            # Method 1: Check if filled by door
+                                            is_door = False
+                                            if hasattr(element, 'HasFillings'):
+                                                for filling_rel in element.HasFillings:
+                                                    if hasattr(filling_rel, 'RelatedBuildingElement'):
+                                                        if filling_rel.RelatedBuildingElement.is_a("IfcDoor"):
+                                                            is_door = True
+                                                            break
+                                            
+                                            # Method 2: Check name
+                                            if not is_door:
+                                                opening_name = element.Name if hasattr(element, 'Name') else ''
+                                                if opening_name:
+                                                    name_lower = opening_name.lower()
+                                                    if any(keyword in name_lower for keyword in ['door', 'дверь', 'porte', 'tür', 'entrance']):
+                                                        is_door = True
+                                            
+                                            # If not a door, it's likely a window
+                                            if not is_door:
+                                                is_window = True
+                                                logger.debug(f"Treating IfcOpeningElement {element.id()} as window")
+                                        
+                                        # Apply transparency to windows
+                                        if is_window:
+                                            # Check material for glass/glazing to determine transparency level
+                                            try:
+                                                material_props = self._extract_material_properties(element)
+                                                if material_props:
+                                                    material_name = material_props.get('name', '').lower() if material_props.get('name') else ''
+                                                    has_glazing = material_props.get('has_glazing', False)
+                                                    
+                                                    # If material is glass/glazing, make it more transparent
+                                                    if has_glazing or any(keyword in material_name for keyword in ['glass', 'glazing', 'verre', 'стекло', 'vitrage']):
+                                                        # Glass windows: 30-40% transparent (60-70% opaque)
+                                                        transparency = 0.3
+                                                        logger.debug(f"Applied high transparency to {element_type} {element.id()} (glass/glazing material)")
+                                                    else:
+                                                        # Regular windows: 20% transparent (80% opaque)
+                                                        transparency = 0.2
+                                                        logger.debug(f"Applied transparency to {element_type} {element.id()} (window element)")
+                                                else:
+                                                    # No material found, but it's a window - apply default transparency
+                                                    transparency = 0.25  # 25% transparent = 75% opaque
+                                                    logger.debug(f"Applied default transparency to {element_type} {element.id()} (window, no material)")
+                                            except Exception as e:
+                                                # Fallback: apply default transparency for windows
+                                                transparency = 0.25
+                                                logger.debug(f"Applied default transparency to {element_type} {element.id()} (window, error checking material: {e})")
+                                        
+                                        alpha = 1.0 - transparency  # Convert to alpha (1.0 = opaque)
+                                        
+                                        # Trimesh expects colors in 0-255 range for uint8 or 0.0-1.0 for float
+                                        # Use 0-255 range (uint8) for better compatibility
+                                        color_rgba = np.array([
+                                            int(r * 255),
+                                            int(g * 255),
+                                            int(b * 255),
+                                            int(alpha * 255)
+                                        ], dtype=np.uint8)
+                                        
+                                        # Apply color to all faces (per-face coloring)
+                                        num_faces = len(mesh.faces)
+                                        face_colors = np.tile(color_rgba, (num_faces, 1))
+                                        mesh.visual.face_colors = face_colors
+                                        
+                                        logger.debug(f"✓ Applied color to {element_type} {element.id()}: RGB({r*255:.0f}, {g*255:.0f}, {b*255:.0f}), alpha={alpha:.2f}")
+                                    else:
+                                        # No color found - use default light gray
+                                        # BUT: For windows, apply transparency even with default color
+                                        is_window = False
+                                        window_alpha = 255  # Default opaque
+                                        
+                                        # Check if element is a window
+                                        if element_type == "IfcWindow":
+                                            is_window = True
+                                        elif element.is_a("IfcPlate"):
+                                            # Check if plate is a glazing panel
+                                            try:
+                                                material_props = self._extract_material_properties(element)
+                                                if material_props and (material_props.get('has_glazing') or material_props.get('is_window_material')):
+                                                    is_window = True
+                                            except:
+                                                pass
+                                        elif element.is_a("IfcOpeningElement"):
+                                            # Check if opening is a window (not a door)
+                                            opening_name = element.Name if hasattr(element, 'Name') else ''
+                                            if opening_name:
+                                                name_lower = opening_name.lower()
+                                                if not any(keyword in name_lower for keyword in ['door', 'дверь', 'porte', 'tür']):
+                                                    is_window = True
+                                            else:
+                                                is_window = True
+                                        
+                                        # Apply transparency to windows even with default color
+                                        if is_window:
+                                            # Windows should be semi-transparent (75% opaque = 25% transparent)
+                                            window_alpha = int(255 * 0.75)  # 75% opacity
+                                            logger.debug(f"Applied transparency to {element_type} {element.id()} (window with default color)")
+                                        
+                                        default_color = np.array([200, 200, 200, window_alpha], dtype=np.uint8)
+                                        num_faces = len(mesh.faces)
+                                        face_colors = np.tile(default_color, (num_faces, 1))
+                                        mesh.visual.face_colors = face_colors
+                                        
+                                        # Log which element is missing color for debugging
+                                        element_name = getattr(element, 'Name', 'Unnamed')
+                                        element_id = getattr(element, 'GlobalId', element.id())
+                                        if element_type == "IfcWindow" or is_window:
+                                            logger.info(f"⚠ Window '{element_name}' (ID: {element_id}) has no color but transparency applied")
                                         else:
-                                            logger.debug(f"Created mesh is empty: {len(mesh.vertices)} vertices, {len(mesh.faces)} faces")
-                                    except Exception as mesh_error:
-                                        logger.debug(f"Failed to create trimesh from geometry: {mesh_error}")
-                                        continue
+                                            logger.debug(f"⚠ No color found for {element_type} '{element_name}' (ID: {element_id}), using default gray")
+                                    
+                                    # Wrap color extraction in try/except for error handling
+                                    try:
+                                        pass  # Color extraction already done above
+                                    except Exception as color_error:
+                                        logger.warning(f"Error applying color to {element_type} {element.id()}: {color_error}")
+                                        # Use default gray if color extraction fails
+                                        # BUT: For windows, apply transparency even on error
+                                        is_window = (element_type == "IfcWindow" or 
+                                                   element.is_a("IfcPlate") or 
+                                                   element.is_a("IfcOpeningElement"))
+                                        window_alpha = int(255 * 0.75) if is_window else 255  # 75% opacity for windows
+                                        default_color = np.array([200, 200, 200, window_alpha], dtype=np.uint8)
+                                        num_faces = len(mesh.faces)
+                                        face_colors = np.tile(default_color, (num_faces, 1))
+                                        mesh.visual.face_colors = face_colors
+                                        if is_window:
+                                            logger.debug(f"Applied transparency to {element_type} {element.id()} (window, color extraction error)")
+                                    
+                                    # Store comprehensive metadata with mesh
+                                    try:
+                                        # Store metadata in mesh for later access
+                                        if not hasattr(mesh, 'metadata'):
+                                            mesh.metadata = element_metadata
+                                        else:
+                                            mesh.metadata.update(element_metadata)
+                                        
+                                        # Also store in mesh visual for compatibility
+                                        if not hasattr(mesh, 'visual'):
+                                            mesh.visual = type('obj', (object,), {})()
+                                        if not hasattr(mesh.visual, 'metadata'):
+                                            mesh.visual.metadata = element_metadata
+                                        
+                                        # Log metadata extraction success
+                                        logger.debug(f"✓ Extracted metadata for {element_metadata.get('element_type', 'Unknown')} "
+                                                   f"{element_metadata.get('element_global_id', 'N/A')}: "
+                                                   f"Color={'Yes' if element_metadata.get('color_style', {}).get('color') else 'No'}, "
+                                                   f"Material={'Yes' if element_metadata.get('material_name') else 'No'}")
+                                    except Exception as meta_error:
+                                        logger.debug(f"Error storing metadata: {meta_error}")
+                                    
+                                    meshes.append(mesh)
+                                    successful_elements += 1
                                 else:
-                                    logger.debug(f"Could not extract valid geometry for {element_type} {element.id()}")
-                            except Exception as geom_error:
-                                logger.debug(f"Error converting geometry for {element_type} {element.id()}: {geom_error}")
-                                continue
-                        except Exception as e:
-                            logger.debug(f"Error processing {element_type} {element.id()}: {e}")
-                            continue
+                                    logger.debug(f"Mesh became empty after cleaning for {element_type} {element.id()}")
+                                    skipped_elements += 1
+                            else:
+                                logger.debug(f"Created mesh is empty for {element_type} {element.id()}: {len(mesh.vertices)} vertices, {len(mesh.faces)} faces")
+                                skipped_elements += 1
+                        except Exception as mesh_error:
+                            logger.debug(f"Failed to create trimesh from geometry for {element_type} {element.id()}: {mesh_error}")
+                            failed_elements += 1
+                    else:
+                        logger.debug(f"Could not extract valid geometry for {element_type} {element.id()}")
+                        skipped_elements += 1
                 except Exception as e:
-                    logger.debug(f"Error getting {element_type} elements: {e}")
+                    logger.debug(f"Error processing {element_type} {element.id()}: {e}")
+                    failed_elements += 1
                     continue
             
-            logger.info(f"Processed {successful_elements}/{total_elements} elements for mesh generation")
+            # Log comprehensive statistics with metadata extraction summary
+            logger.info("=" * 80)
+            logger.info("GEOMETRY EXTRACTION STATISTICS")
+            logger.info("=" * 80)
+            logger.info(f"Total elements processed: {total_elements}")
+            logger.info(f"  ✓ Successful: {successful_elements} ({100*successful_elements/max(total_elements,1):.1f}%)")
+            logger.info(f"  ✗ Failed: {failed_elements} ({100*failed_elements/max(total_elements,1):.1f}%)")
+            logger.info(f"  ⊘ Skipped (no geometry): {skipped_elements} ({100*skipped_elements/max(total_elements,1):.1f}%)")
+            logger.info("")
+            logger.info("Elements by type:")
+            for elem_type, count in sorted(element_type_counts.items(), key=lambda x: x[1], reverse=True):
+                logger.info(f"  {elem_type}: {count}")
+            
+            # METADATA EXTRACTION STATISTICS
+            if meshes:
+                logger.info("")
+                logger.info("METADATA EXTRACTION SUMMARY:")
+                elements_with_color = 0
+                elements_with_material = 0
+                elements_with_properties = 0
+                window_count = 0
+                material_types = {}
+                
+                for mesh in meshes:
+                    # Check if mesh has metadata
+                    metadata = None
+                    if hasattr(mesh, 'metadata'):
+                        metadata = mesh.metadata
+                    elif hasattr(mesh, 'visual') and hasattr(mesh.visual, 'metadata'):
+                        metadata = mesh.visual.metadata
+                    
+                    if metadata:
+                        if metadata.get('color_style', {}).get('color'):
+                            elements_with_color += 1
+                        if metadata.get('material_name'):
+                            elements_with_material += 1
+                            mat_type = metadata.get('material_type', 'Unknown')
+                            material_types[mat_type] = material_types.get(mat_type, 0) + 1
+                        if metadata.get('properties'):
+                            elements_with_properties += 1
+                        if metadata.get('is_window'):
+                            window_count += 1
+                
+                logger.info(f"  ✓ Elements with color: {elements_with_color}/{len(meshes)} ({100*elements_with_color/len(meshes):.1f}%)")
+                logger.info(f"  ✓ Elements with material: {elements_with_material}/{len(meshes)} ({100*elements_with_material/len(meshes):.1f}%)")
+                logger.info(f"  ✓ Elements with properties: {elements_with_properties}/{len(meshes)} ({100*elements_with_properties/len(meshes):.1f}%)")
+                logger.info(f"  ✓ Windows detected: {window_count}")
+                
+                if material_types:
+                    logger.info("  Material types found:")
+                    for mat_type, count in sorted(material_types.items(), key=lambda x: x[1], reverse=True):
+                        logger.info(f"    {mat_type}: {count}")
+            
+            logger.info("=" * 80)
             
             if not meshes:
                 logger.warning("No valid meshes generated from IFC geometry")
@@ -3388,7 +4260,7 @@ class IFCImporter(BaseImporter):
                 logger.info(f"ℹ {missing_count} element(s) are missing colors (using default gray)")
                 logger.info("This is normal if some elements don't have style definitions in the IFC file")
             
-            # Combine all meshes into one
+            # CRITICAL: Combine all meshes into one with proper handling
             if len(meshes) == 1:
                 combined_mesh = meshes[0]
                 logger.info(f"Using single mesh: {len(combined_mesh.vertices):,} vertices, {len(combined_mesh.faces):,} faces")
@@ -3398,29 +4270,58 @@ class IFCImporter(BaseImporter):
                 logger.info(f"Combining {len(meshes)} meshes into single mesh...")
                 try:
                     # trimesh.util.concatenate preserves visual properties including colors
+                    # This is the recommended way to combine multiple meshes
                     combined_mesh = trimesh.util.concatenate(meshes)
-                    logger.info(f"Successfully combined {len(meshes)} meshes")
+                    logger.info(f"✓ Successfully combined {len(meshes)} meshes")
                     if hasattr(combined_mesh.visual, 'face_colors') and combined_mesh.visual.face_colors is not None:
-                        logger.info(f"Combined mesh has colors: {len(combined_mesh.visual.face_colors)} face colors")
+                        logger.info(f"Combined mesh has colors: {len(combined_mesh.visual.face_colors):,} face colors")
                 except Exception as e:
-                    logger.error(f"Failed to combine meshes: {e}")
-                    # Try to use the first mesh as fallback
-                    if meshes:
-                        logger.warning("Using first mesh as fallback")
-                        combined_mesh = meshes[0]
-                    else:
-                        return None
+                    logger.error(f"Failed to combine meshes using concatenate: {e}")
+                    # Fallback: Try combining in batches if single concatenate fails
+                    try:
+                        logger.info("Attempting batch combination...")
+                        batch_size = 100
+                        current_mesh = meshes[0]
+                        for i in range(1, len(meshes), batch_size):
+                            batch = meshes[i:i+batch_size]
+                            if len(batch) > 0:
+                                batch_combined = trimesh.util.concatenate([current_mesh] + batch)
+                                current_mesh = batch_combined
+                        combined_mesh = current_mesh
+                        logger.info(f"✓ Successfully combined {len(meshes)} meshes using batch method")
+                    except Exception as e2:
+                        logger.error(f"Batch combination also failed: {e2}")
+                        # Last resort: use the first mesh
+                        if meshes:
+                            logger.warning("Using first mesh as fallback (some geometry may be missing)")
+                            combined_mesh = meshes[0]
+                        else:
+                            return None
             
-            # Clean up mesh (remove duplicate vertices, etc.)
+            # CRITICAL: Clean up and validate final mesh
             try:
                 if hasattr(combined_mesh, 'process'):
-                    logger.debug("Processing mesh (removing duplicates, etc.)...")
+                    logger.info("Processing final mesh (removing duplicates, fixing normals, etc.)...")
+                    # Process mesh to clean up geometry
+                    # This removes duplicate vertices, fixes normals, etc.
                     combined_mesh.process()
+                    logger.info("✓ Mesh processing complete")
             except Exception as e:
                 logger.warning(f"Mesh processing failed (continuing anyway): {e}")
             
-            logger.info(f"✓ Mesh generation complete: {len(combined_mesh.vertices):,} vertices, {len(combined_mesh.faces):,} faces")
-            logger.info(f"Mesh bounds: {combined_mesh.bounds}")
+            # Final validation
+            if len(combined_mesh.vertices) == 0 or len(combined_mesh.faces) == 0:
+                logger.error("Final combined mesh has no geometry!")
+                return None
+            
+            logger.info("=" * 80)
+            logger.info(f"✓✓✓ MESH GENERATION COMPLETE ✓✓✓")
+            logger.info(f"Final mesh: {len(combined_mesh.vertices):,} vertices, {len(combined_mesh.faces):,} faces")
+            logger.info(f"Mesh bounds: min={combined_mesh.bounds[0]}, max={combined_mesh.bounds[1]}")
+            logger.info(f"Mesh volume: {combined_mesh.volume:.2f} cubic units")
+            if hasattr(combined_mesh.visual, 'face_colors') and combined_mesh.visual.face_colors is not None:
+                logger.info(f"Colors applied: {len(combined_mesh.visual.face_colors):,} face colors")
+            logger.info("=" * 80)
             return combined_mesh
             
         except Exception as e:

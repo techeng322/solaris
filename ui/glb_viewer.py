@@ -144,13 +144,38 @@ if PYQT6_AVAILABLE:
             logger.info(f"Update called for object highlight: {window.id}")
         
         def _create_window_mesh(self, window):
-            """Create a trimesh representation of a window or object from its properties."""
+            """Create a trimesh representation of a window or object from its properties.
+            
+            For IFC files, extracts the ACTUAL geometry mesh from the IFC file instead of creating a synthetic mesh.
+            For other files, creates a synthetic rectangle mesh from properties.
+            """
             import trimesh
             from models.building import Window
             import logging
             
             logger = logging.getLogger(__name__)
             
+            # CRITICAL FIX: For IFC files, extract ACTUAL geometry mesh instead of creating synthetic mesh
+            if hasattr(window, 'properties') and isinstance(window.properties, dict):
+                ifc_element_id = window.properties.get('ifc_element_id')
+                ifc_file_path = window.properties.get('ifc_file_path')
+                
+                if ifc_element_id and ifc_file_path:
+                    logger.info(f"Extracting ACTUAL geometry mesh for IFC element {ifc_element_id} from {ifc_file_path}")
+                    try:
+                        from importers.ifc_importer import IFCImporter
+                        actual_mesh = IFCImporter.extract_element_mesh(ifc_file_path, ifc_element_id)
+                        if actual_mesh is not None and len(actual_mesh.vertices) > 0 and len(actual_mesh.faces) > 0:
+                            logger.info(f"✓ Successfully extracted actual geometry mesh: {len(actual_mesh.vertices)} vertices, {len(actual_mesh.faces)} faces")
+                            return actual_mesh
+                        else:
+                            logger.warning(f"Could not extract geometry for IFC element {ifc_element_id} (mesh is None or empty), falling back to synthetic mesh")
+                    except Exception as e:
+                        logger.error(f"Error extracting IFC geometry for element {ifc_element_id}: {e}, falling back to synthetic mesh", exc_info=True)
+                else:
+                    logger.debug(f"Window {getattr(window, 'id', 'unknown')} does not have IFC element info (ifc_element_id={ifc_element_id}, ifc_file_path={ifc_file_path})")
+            
+            # Fallback: Create synthetic mesh from properties (for non-IFC files or if IFC extraction fails)
             # Validate object has required properties (works for Window or any object with these attributes)
             if not hasattr(window, 'center') or window.center is None:
                 logger.warning(f"Object {getattr(window, 'id', 'unknown')} missing center property")
@@ -883,12 +908,15 @@ else:
             
             # Generate object mesh if not cached (works for windows and other objects)
             if window.id not in self.window_meshes:
+                logger.info(f"Creating mesh for object {window.id}...")
                 object_mesh = self._create_window_mesh(window)
                 self.window_meshes[window.id] = object_mesh
                 if object_mesh is None:
-                    logger.warning(f"Failed to create mesh for object {window.id}")
+                    logger.error(f"Failed to create mesh for object {window.id} - highlight will not be visible")
                 else:
-                    logger.info(f"Created mesh for object {window.id} with {len(object_mesh.vertices)} vertices")
+                    logger.info(f"✓ Created mesh for object {window.id} with {len(object_mesh.vertices)} vertices, {len(object_mesh.faces)} faces")
+            else:
+                logger.debug(f"Using cached mesh for object {window.id}")
             
             # If viewer is not open, open it automatically with the highlighted object
             if not self.trimesh_viewer_open:
@@ -951,7 +979,8 @@ else:
         def _create_window_mesh(self, window):
             """Create a trimesh representation of an object (window or any object) from its properties. Works for any object with center, normal, and size attributes.
             
-            Creates a visible box-shaped highlight that extends slightly from the surface for better visibility.
+            For IFC files, extracts the ACTUAL geometry mesh from the IFC file instead of creating a synthetic mesh.
+            For other files, creates a visible box-shaped highlight that extends slightly from the surface for better visibility.
             """
             import trimesh
             import numpy as np
@@ -959,6 +988,27 @@ else:
             
             logger = logging.getLogger(__name__)
             
+            # CRITICAL FIX: For IFC files, extract ACTUAL geometry mesh instead of creating synthetic mesh
+            if hasattr(window, 'properties') and isinstance(window.properties, dict):
+                ifc_element_id = window.properties.get('ifc_element_id')
+                ifc_file_path = window.properties.get('ifc_file_path')
+                
+                if ifc_element_id and ifc_file_path:
+                    logger.info(f"Extracting ACTUAL geometry mesh for IFC element {ifc_element_id} from {ifc_file_path}")
+                    try:
+                        from importers.ifc_importer import IFCImporter
+                        actual_mesh = IFCImporter.extract_element_mesh(ifc_file_path, ifc_element_id)
+                        if actual_mesh is not None and len(actual_mesh.vertices) > 0 and len(actual_mesh.faces) > 0:
+                            logger.info(f"✓ Successfully extracted actual geometry mesh: {len(actual_mesh.vertices)} vertices, {len(actual_mesh.faces)} faces")
+                            return actual_mesh
+                        else:
+                            logger.warning(f"Could not extract geometry for IFC element {ifc_element_id} (mesh is None or empty), falling back to synthetic mesh")
+                    except Exception as e:
+                        logger.error(f"Error extracting IFC geometry for element {ifc_element_id}: {e}, falling back to synthetic mesh", exc_info=True)
+                else:
+                    logger.debug(f"Window {getattr(window, 'id', 'unknown')} does not have IFC element info (ifc_element_id={ifc_element_id}, ifc_file_path={ifc_file_path})")
+            
+            # Fallback: Create synthetic mesh from properties (for non-IFC files or if IFC extraction fails)
             # Validate object properties (works for windows and other objects)
             if not hasattr(window, 'center') or window.center is None:
                 logger.warning(f"Object {getattr(window, 'id', 'unknown')} missing center property")
@@ -1121,8 +1171,73 @@ else:
                         
                         logger.info(f"Colored highlight mesh for {object_id}: {num_faces} faces, color RGBA(0, 200, 255, 180)")
                         logger.debug(f"Face colors shape: {face_colors.shape}, dtype: {face_colors.dtype}, sample: {face_colors[0] if len(face_colors) > 0 else 'empty'}")
-                        scene.add_geometry(highlighted_mesh, node_name=f'highlighted_{object_id}')
-                        logger.info(f"Added highlighted object {object_id} to Trimesh scene: {len(highlighted_mesh.vertices)} vertices, {len(highlighted_mesh.faces)} faces")
+                        
+                        # Log mesh bounds for debugging
+                        bounds = highlighted_mesh.bounds
+                        center = highlighted_mesh.centroid
+                        size = bounds[1] - bounds[0]
+                        logger.info(f"Highlight mesh bounds: min={bounds[0]}, max={bounds[1]}, center={center}, size={size}")
+                        
+                        # Compare with main mesh bounds to check if highlight is in reasonable position
+                        if hasattr(self, 'mesh') and self.mesh is not None:
+                            main_bounds = self.mesh.bounds
+                            main_center = self.mesh.centroid
+                            main_size = main_bounds[1] - main_bounds[0]
+                            distance = np.linalg.norm(np.array(center) - np.array(main_center))
+                            logger.info(f"Main mesh bounds: min={main_bounds[0]}, max={main_bounds[1]}, center={main_center}, size={main_size}")
+                            logger.info(f"Distance from main mesh center to highlight center: {distance:.2f}m")
+                            if distance > 1000:  # More than 1km away - likely wrong coordinate system
+                                logger.warning(f"⚠️ Highlight mesh is very far from main mesh ({distance:.2f}m) - coordinate system mismatch possible!")
+                        
+                        # Make highlight MORE VISIBLE: Create a bounding box that's significantly larger
+                        try:
+                            # Get the bounding box of the highlighted mesh
+                            bbox = highlighted_mesh.bounding_box
+                            bbox_center = bbox.centroid
+                            bbox_extents = bbox.extents
+                            
+                            # Ensure minimum size for visibility (at least 0.2m in each dimension if mesh is very small)
+                            # If the mesh is very small (like 16 vertices), make the bounding box much larger
+                            max_extent = np.max(bbox_extents)
+                            if max_extent < 0.5:  # If mesh is smaller than 50cm, make it more visible
+                                min_size = 0.3  # 30cm minimum for small meshes
+                                bbox_extents = np.maximum(bbox_extents, min_size)
+                                scale_factor = 1.5  # Scale up by 50% for small meshes
+                            else:
+                                min_size = 0.1  # 10cm minimum for larger meshes
+                                bbox_extents = np.maximum(bbox_extents, min_size)
+                                scale_factor = 1.2  # Scale up by 20% for larger meshes
+                            
+                            scaled_extents = bbox_extents * scale_factor
+                            logger.info(f"Original mesh extents: {bbox_extents}, scaled extents: {scaled_extents}, scale_factor: {scale_factor}")
+                            
+                            # Create a new box mesh that's larger
+                            bbox_mesh = trimesh.creation.box(extents=scaled_extents)
+                            bbox_mesh.apply_translation(bbox_center - bbox_mesh.centroid)
+                            
+                            # Use BRIGHTER, MORE OPAQUE color for bounding box (fully opaque for maximum visibility)
+                            bright_color_rgba = np.array([0, 255, 255, 255], dtype=np.uint8)  # Bright cyan, fully opaque
+                            bbox_face_colors = np.tile(bright_color_rgba, (len(bbox_mesh.faces), 1))
+                            bbox_mesh.visual.face_colors = bbox_face_colors
+                            
+                            # Also make the original mesh brighter
+                            bright_mesh_color = np.array([0, 200, 255, 220], dtype=np.uint8)  # Brighter, more opaque
+                            bright_face_colors = np.tile(bright_mesh_color, (num_faces, 1))
+                            highlighted_mesh.visual.face_colors = bright_face_colors
+                            
+                            # Add both the original mesh AND the bounding box for maximum visibility
+                            scene.add_geometry(highlighted_mesh, node_name=f'highlighted_{object_id}')
+                            scene.add_geometry(bbox_mesh, node_name=f'highlighted_bbox_{object_id}')
+                            logger.info(f"Added highlighted object {object_id} with bounding box to Trimesh scene: mesh={len(highlighted_mesh.vertices)} vertices, bbox={len(bbox_mesh.vertices)} vertices")
+                            logger.info(f"Bounding box extents: {scaled_extents}, center: {bbox_center}")
+                        except Exception as bbox_error:
+                            logger.warning(f"Could not create bounding box for highlight: {bbox_error}, using original mesh only", exc_info=True)
+                            # Make the original mesh brighter if bounding box fails
+                            bright_mesh_color = np.array([0, 255, 255, 255], dtype=np.uint8)  # Bright cyan, fully opaque
+                            bright_face_colors = np.tile(bright_mesh_color, (num_faces, 1))
+                            highlighted_mesh.visual.face_colors = bright_face_colors
+                            scene.add_geometry(highlighted_mesh, node_name=f'highlighted_{object_id}')
+                            logger.info(f"Added highlighted object {object_id} to Trimesh scene: {len(highlighted_mesh.vertices)} vertices, {len(highlighted_mesh.faces)} faces")
                     except Exception as e:
                         logger.warning(f"Could not color object mesh: {e}, showing without color", exc_info=True)
                         try:
