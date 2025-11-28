@@ -167,13 +167,32 @@ if PYQT6_AVAILABLE:
                         actual_mesh = IFCImporter.extract_element_mesh(ifc_file_path, ifc_element_id)
                         if actual_mesh is not None and len(actual_mesh.vertices) > 0 and len(actual_mesh.faces) > 0:
                             logger.info(f"✓ Successfully extracted actual geometry mesh: {len(actual_mesh.vertices)} vertices, {len(actual_mesh.faces)} faces")
+                            
+                            # Check if mesh has colors applied (from IFC material/style)
+                            if hasattr(actual_mesh, 'visual') and hasattr(actual_mesh.visual, 'face_colors'):
+                                if actual_mesh.visual.face_colors is not None and len(actual_mesh.visual.face_colors) > 0:
+                                    first_color = actual_mesh.visual.face_colors[0]
+                                    logger.info(f"✓ Mesh has material/color applied: RGBA({first_color[0]}, {first_color[1]}, {first_color[2]}, {first_color[3]})")
+                                else:
+                                    logger.warning(f"⚠ Mesh extracted but no colors applied - window may appear transparent")
+                            
                             return actual_mesh
                         else:
-                            logger.warning(f"Could not extract geometry for IFC element {ifc_element_id} (mesh is None or empty), falling back to synthetic mesh")
+                            logger.warning(f"⚠ Could not extract geometry for IFC element {ifc_element_id} (mesh is None or empty)")
+                            logger.warning(f"  This window will use a synthetic transparent box mesh instead of actual geometry")
+                            logger.warning(f"  Possible causes: element has no geometry, extraction failed, or element ID not found")
                     except Exception as e:
-                        logger.error(f"Error extracting IFC geometry for element {ifc_element_id}: {e}, falling back to synthetic mesh", exc_info=True)
+                        logger.error(f"⚠ Error extracting IFC geometry for element {ifc_element_id}: {e}")
+                        logger.error(f"  This window will use a synthetic transparent box mesh instead of actual geometry")
+                        logger.error(f"  Error: {type(e).__name__}: {str(e)}")
                 else:
-                    logger.debug(f"Window {getattr(window, 'id', 'unknown')} does not have IFC element info (ifc_element_id={ifc_element_id}, ifc_file_path={ifc_file_path})")
+                    missing_info = []
+                    if not ifc_element_id:
+                        missing_info.append("ifc_element_id")
+                    if not ifc_file_path:
+                        missing_info.append("ifc_file_path")
+                    logger.warning(f"⚠ Window {getattr(window, 'id', 'unknown')} missing IFC element info: {', '.join(missing_info)}")
+                    logger.warning(f"  This window will use a synthetic transparent box mesh instead of actual geometry")
             
             # Fallback: Create synthetic mesh from properties (for non-IFC files or if IFC extraction fails)
             # Validate object has required properties (works for Window or any object with these attributes)
@@ -1000,13 +1019,32 @@ else:
                         actual_mesh = IFCImporter.extract_element_mesh(ifc_file_path, ifc_element_id)
                         if actual_mesh is not None and len(actual_mesh.vertices) > 0 and len(actual_mesh.faces) > 0:
                             logger.info(f"✓ Successfully extracted actual geometry mesh: {len(actual_mesh.vertices)} vertices, {len(actual_mesh.faces)} faces")
+                            
+                            # Check if mesh has colors applied (from IFC material/style)
+                            if hasattr(actual_mesh, 'visual') and hasattr(actual_mesh.visual, 'face_colors'):
+                                if actual_mesh.visual.face_colors is not None and len(actual_mesh.visual.face_colors) > 0:
+                                    first_color = actual_mesh.visual.face_colors[0]
+                                    logger.info(f"✓ Mesh has material/color applied: RGBA({first_color[0]}, {first_color[1]}, {first_color[2]}, {first_color[3]})")
+                                else:
+                                    logger.warning(f"⚠ Mesh extracted but no colors applied - window may appear transparent")
+                            
                             return actual_mesh
                         else:
-                            logger.warning(f"Could not extract geometry for IFC element {ifc_element_id} (mesh is None or empty), falling back to synthetic mesh")
+                            logger.warning(f"⚠ Could not extract geometry for IFC element {ifc_element_id} (mesh is None or empty)")
+                            logger.warning(f"  This window will use a synthetic transparent box mesh instead of actual geometry")
+                            logger.warning(f"  Possible causes: element has no geometry, extraction failed, or element ID not found")
                     except Exception as e:
-                        logger.error(f"Error extracting IFC geometry for element {ifc_element_id}: {e}, falling back to synthetic mesh", exc_info=True)
+                        logger.error(f"⚠ Error extracting IFC geometry for element {ifc_element_id}: {e}")
+                        logger.error(f"  This window will use a synthetic transparent box mesh instead of actual geometry")
+                        logger.error(f"  Error: {type(e).__name__}: {str(e)}")
                 else:
-                    logger.debug(f"Window {getattr(window, 'id', 'unknown')} does not have IFC element info (ifc_element_id={ifc_element_id}, ifc_file_path={ifc_file_path})")
+                    missing_info = []
+                    if not ifc_element_id:
+                        missing_info.append("ifc_element_id")
+                    if not ifc_file_path:
+                        missing_info.append("ifc_file_path")
+                    logger.warning(f"⚠ Window {getattr(window, 'id', 'unknown')} missing IFC element info: {', '.join(missing_info)}")
+                    logger.warning(f"  This window will use a synthetic transparent box mesh instead of actual geometry")
             
             # Fallback: Create synthetic mesh from properties (for non-IFC files or if IFC extraction fails)
             # Validate object properties (works for windows and other objects)

@@ -882,20 +882,61 @@ if PYQT6_AVAILABLE:
                 # Clear highlight for building selection
                 self.glb_viewer_widget.highlight_window(None)
             else:
-                # For any other object, try to highlight if it has the required attributes
-                logger.info(f"Object selected: {type(selected_object).__name__} - attempting highlight")
-                # Check if object has required attributes for highlighting (id, center, normal, size)
-                if (hasattr(selected_object, 'id') and 
-                    hasattr(selected_object, 'center') and 
-                    hasattr(selected_object, 'normal') and 
-                    hasattr(selected_object, 'size')):
-                    # Try to highlight (this will open Trimesh viewer automatically if not open)
-                    self.glb_viewer_widget.highlight_window(selected_object)
-                    logger.info(f"Highlight request sent for object: {getattr(selected_object, 'id', 'unknown')}")
+                # Check if this is an IFC element (ifcopenshell entity)
+                # IFC elements have attributes like 'id()', 'GlobalId', 'is_a()'
+                is_ifc_element = False
+                ifc_element_id = None
+                ifc_file_path = None
+                
+                try:
+                    # Check if object has IFC element characteristics
+                    if hasattr(selected_object, 'id') and callable(selected_object.id):
+                        # Try to get element ID
+                        try:
+                            ifc_element_id = str(selected_object.id())
+                            # Check if we have the file path from the importer
+                            if hasattr(self, 'current_file_path') and self.current_file_path:
+                                if self.current_file_path.lower().endswith('.ifc'):
+                                    ifc_file_path = self.current_file_path
+                                    is_ifc_element = True
+                                    logger.info(f"Detected IFC element: {type(selected_object).__name__} (ID: {ifc_element_id})")
+                        except Exception:
+                            pass
+                except Exception as e:
+                    logger.debug(f"Error checking if object is IFC element: {e}")
+                
+                if is_ifc_element and ifc_element_id and ifc_file_path:
+                    # Create a wrapper object with IFC element info for highlighting
+                    class IFCElementWrapper:
+                        """Wrapper for IFC elements to enable highlighting."""
+                        def __init__(self, ifc_element, element_id, file_path):
+                            self.ifc_element = ifc_element
+                            self.id = f"IFC_{element_id}"
+                            self.properties = {
+                                'ifc_element_id': element_id,
+                                'ifc_file_path': file_path,
+                                'ifc_element_type': ifc_element.is_a() if hasattr(ifc_element, 'is_a') else 'Unknown'
+                            }
+                    
+                    wrapper = IFCElementWrapper(selected_object, ifc_element_id, ifc_file_path)
+                    logger.info(f"Highlighting IFC element: {wrapper.id} (type: {wrapper.properties['ifc_element_type']})")
+                    self.glb_viewer_widget.highlight_window(wrapper)
+                    logger.info(f"Highlight request sent for IFC element: {wrapper.id}")
                 else:
-                    logger.debug(f"Object {type(selected_object).__name__} does not have required attributes for highlighting")
-                    # Clear highlight if object can't be highlighted
-                    self.glb_viewer_widget.highlight_window(None)
+                    # For any other object, try to highlight if it has the required attributes
+                    logger.info(f"Object selected: {type(selected_object).__name__} - attempting highlight")
+                    # Check if object has required attributes for highlighting (id, center, normal, size)
+                    if (hasattr(selected_object, 'id') and 
+                        hasattr(selected_object, 'center') and 
+                        hasattr(selected_object, 'normal') and 
+                        hasattr(selected_object, 'size')):
+                        # Try to highlight (this will open Trimesh viewer automatically if not open)
+                        self.glb_viewer_widget.highlight_window(selected_object)
+                        logger.info(f"Highlight request sent for object: {getattr(selected_object, 'id', 'unknown')}")
+                    else:
+                        logger.debug(f"Object {type(selected_object).__name__} does not have required attributes for highlighting")
+                        # Clear highlight if object can't be highlighted
+                        self.glb_viewer_widget.highlight_window(None)
         
         def update_results_table(self, result):
             """Update results table with calculation results (windows only)."""

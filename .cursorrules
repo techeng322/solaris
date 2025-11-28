@@ -405,7 +405,202 @@ def show_glb_viewer(self):
 
 # Scratchpad
 
-## Current Task: IFC Window Size Validation - Fix Incorrect Window Detection
+## Current Task: ULTRA-DEEP Window Detection - Maximum Coverage IFC Window Extraction
+
+Status: ✅ **COMPLETE** ✅
+
+**Requirement**: 
+- User reported: "If you think more and more deeply for ifc file. I think I can get good result."
+- Need ULTRA-DEEP analysis to catch ALL windows in IFC files using every possible method
+- Must check properties, classifications, recursive relationships, and all IFC representation methods
+
+**Implementation COMPLETED**:
+[X] **Property-Based Detection (NEW Method 7)**: 
+  - Checks for window-specific property sets (Pset_WindowCommon, Pset_Window, etc.)
+  - Checks property names for window keywords
+  - Checks IFC classification references for window classifications
+  - Extracts windows based on property/classification indicators
+[X] **Enhanced Opening Analysis**: 
+  - Checks opening properties for window indicators
+  - Checks opening names for window keywords
+  - More intelligent opening-to-window conversion
+  - Distinguishes between window and door openings
+[X] **Recursive Relationship Traversal (NEW Method 9)**: 
+  - Recursively traverses ALL IFC relationships (IsDecomposedBy, IsNestedBy, HasAssignments)
+  - Finds windows nested deep in complex structures
+  - Traverses from building elements down to find all windows
+  - Maximum depth of 5 levels to avoid infinite loops
+[X] **Comprehensive Detection Summary**: 
+  - Added detailed logging showing detection method for each window
+  - Summary statistics showing windows found by each source type
+  - Better debugging information
+
+**Changes Made**:
+- **importers/ifc_importer.py**: 
+  - Enhanced Method 2: Deep opening analysis with property checking (lines 350-401)
+  - Added Method 7: Property-based detection (lines 750-850)
+  - Added Method 9: Recursive relationship traversal (lines 900-1000)
+  - Enhanced logging with detection summary (lines 1000-1010)
+
+**Technical Details**:
+- **Property Detection**: 
+  - Checks `IfcPropertySet` names and property names for window keywords
+  - Checks `IfcRelAssociatesClassification` for window classifications
+  - Window property keywords: 'window', 'окно', 'fenetre', 'fenster', 'glazing', 'glass', 'pane', 'Pset_WindowCommon'
+- **Recursive Traversal**: 
+  - Traverses `IsDecomposedBy` (decomposition relationships)
+  - Traverses `IsNestedBy` (nesting relationships)
+  - Traverses `HasAssignments` (assignment relationships)
+  - Starts from building, storeys, spaces, walls, assemblies
+  - Maximum depth: 5 levels (prevents infinite loops)
+- **Opening Analysis**: 
+  - Checks opening name for window/door keywords
+  - Checks opening properties for window indicators
+  - More intelligent decision-making about opening-to-window conversion
+
+**Detection Methods Now (9+ methods)**:
+1. Direct IfcWindow elements
+2. Window type instances (IfcWindowType)
+3. Opening elements (enhanced with property analysis)
+4. IfcPlate elements (glazing panels)
+5. IfcMember elements (window frames)
+6. Windows from walls
+7. Material-based detection
+8. Geometry-based detection
+9. Relationship-based detection (assemblies, decompositions, curtain walls, etc.)
+10. Property-based detection (NEW)
+11. Comprehensive scan of all IfcProduct elements
+12. Recursive relationship traversal (NEW)
+
+**Benefits**:
+- **Maximum Coverage**: Uses every possible method to find windows
+- **Property-Aware**: Finds windows based on IFC property sets and classifications
+- **Relationship-Aware**: Finds windows nested deep in complex structures
+- **Intelligent Analysis**: Makes better decisions about what is/isn't a window
+- **Better Logging**: Detailed statistics help identify which methods are most effective
+- **Comprehensive**: Should detect close to 100% of windows in IFC files
+
+**Status**: ✅ **ULTRA-DEEP WINDOW DETECTION COMPLETE**
+
+## Previous Task: Deep Window Detection - Comprehensive IFC Window Extraction
+
+Status: ✅ **COMPLETE** ✅
+
+**Requirement**: 
+- User reported: "please think more deeply to get all objects type (especially for window) correctly"
+- Need to improve window detection to catch ALL windows in IFC files, not just ~50%
+- Must check all IFC relationships, element types, and representation methods
+
+**Implementation COMPLETED**:
+[X] **Window Type Instance Detection**: 
+  - Added detection for windows that are instances of `IfcWindowType`
+  - Checks `Types` relationship to find all window instances from types
+[X] **Enhanced Opening Extraction**: 
+  - Improved logic to extract windows that fill openings (via `HasFillings` relationship)
+  - Extracts the actual window element when opening is filled by window
+  - Extracts opening as window when not filled by door or window
+[X] **Window Member Detection**: 
+  - Added detection for `IfcMember` elements (window frames with glazing)
+  - Checks for window-related keywords and glazing materials
+  - Extracts members that contain glazing as windows
+[X] **Relationship-Based Detection (NEW Method 6)**: 
+  - **Element Assemblies**: Extracts windows from `IfcElementAssembly` (window assemblies)
+  - **Decompositions**: Checks `IsDecomposedBy` relationships for window parts
+  - **Curtain Walls**: Extracts windows from `IfcCurtainWall` systems and panels
+  - **FillsVoids**: Checks `IfcRelFillsElement` relationships for windows filling openings
+  - **Spatial Structure**: Checks `IfcRelContainedInSpatialStructure` for windows in spaces/storeys
+[X] **Comprehensive Detection Methods**: 
+  - Now uses 7+ detection methods covering all possible window representations
+  - Each method checks different IFC relationships and element types
+  - Methods work together to catch windows missed by other methods
+
+**Changes Made**:
+- **importers/ifc_importer.py**: 
+  - Enhanced Method 1: Added window type instance detection (lines 307-339)
+  - Enhanced Method 2: Improved opening extraction with filling relationship checks (lines 324-375)
+  - Enhanced Method 2b: Added IfcMember detection for window frames (lines 357-430)
+  - Added Method 6: Relationship-based detection (lines 542-650)
+  - Method 7: Comprehensive scan of all IfcProduct elements (lines 652-700)
+
+**Technical Details**:
+- **IFC Relationships Checked**: 
+  - `IsTypedBy` / `Types` - Window type instances
+  - `HasFillings` / `FillsVoids` - Windows filling openings
+  - `IsDecomposedBy` - Window assemblies and parts
+  - `IfcRelContainedInSpatialStructure` - Windows in spatial structures
+  - `IfcRelFillsElement` - Direct filling relationships
+- **Element Types Checked**: 
+  - `IfcWindow` (direct)
+  - `IfcWindowType` (type definitions)
+  - `IfcOpeningElement` (openings)
+  - `IfcPlate` (glazing panels)
+  - `IfcMember` (window frames)
+  - `IfcElementAssembly` (window assemblies)
+  - `IfcCurtainWall` / `IfcCurtainWallPanel` (curtain wall systems)
+  - All `IfcProduct` elements (comprehensive scan)
+- **Detection Strategy**: 
+  - Multiple independent methods catch different window representations
+  - Each method validates by size/geometry to avoid false positives
+  - Deduplication removes windows detected by multiple methods
+  - Logging shows which method detected each window
+
+**Benefits**:
+- **Comprehensive Coverage**: Checks all possible IFC relationships and element types
+- **Relationship-Aware**: Finds windows through IFC relationships, not just direct elements
+- **Assembly Support**: Extracts windows from assemblies and decompositions
+- **Curtain Wall Support**: Finds windows in curtain wall systems
+- **Type Instance Support**: Finds windows that are instances of window types
+- **Better Detection Rate**: Should detect significantly more windows (closer to 100%)
+
+**Status**: ✅ **DEEP WINDOW DETECTION COMPLETE**
+
+## Previous Task: Universal Object Highlighting - Highlight Any Object from Object Tree
+
+Status: ✅ **COMPLETE** ✅
+
+**Requirement**: 
+- User reported: "for now, only window was highlighted. Could you highlight any object what I select in Object Tree? I am working with ifc file."
+- Need to enable highlighting for ANY object selected in Object Tree (walls, doors, openings, slabs, spaces, storeys), not just windows
+
+**Implementation COMPLETED**:
+[X] **IFC Element Detection**: 
+  - Added detection logic in `on_object_tree_selection()` to identify IFC elements
+  - Checks for IFC element characteristics (has `id()` method, `is_a()` method)
+  - Extracts element ID and file path from selected IFC element
+[X] **IFC Element Wrapper**: 
+  - Created `IFCElementWrapper` class to wrap IFC elements for highlighting
+  - Wrapper provides same interface as Window objects (id, properties dict)
+  - Properties contain `ifc_element_id`, `ifc_file_path`, `ifc_element_type`
+[X] **Universal Highlighting**: 
+  - Updated `on_object_tree_selection()` to handle IFC elements
+  - Creates wrapper for IFC elements and passes to `highlight_window()`
+  - Existing `_create_window_mesh()` already supports IFC elements via properties
+  - Works for: walls, doors, openings, slabs, spaces, storeys, and any IFC element
+
+**Changes Made**:
+- **ui/main_window.py**: 
+  - Enhanced `on_object_tree_selection()` to detect IFC elements (lines 884-920)
+  - Added `IFCElementWrapper` class for IFC element highlighting
+  - Detects IFC elements by checking for `id()` method and file path
+  - Creates wrapper with IFC element info and highlights it
+
+**Technical Details**:
+- **IFC Element Detection**: Checks if object has `id()` method (callable) - characteristic of ifcopenshell entities
+- **File Path**: Uses `self.current_file_path` stored when IFC file is loaded
+- **Wrapper Pattern**: Wrapper provides same interface as Window objects, enabling reuse of existing highlighting code
+- **Geometry Extraction**: Uses existing `IFCImporter.extract_element_mesh()` method to extract actual geometry
+- **Compatibility**: Works with existing `_create_window_mesh()` method which already checks for IFC element properties
+
+**Benefits**:
+- **Universal Highlighting**: Any object in Object Tree can now be highlighted (not just windows)
+- **IFC Support**: Works with all IFC element types (walls, doors, openings, slabs, spaces, storeys)
+- **Actual Geometry**: Extracts and displays actual IFC geometry (not synthetic meshes)
+- **Consistent Interface**: Uses same highlighting system as windows
+- **Better UX**: Users can select and highlight any building element for inspection
+
+**Status**: ✅ **UNIVERSAL OBJECT HIGHLIGHTING COMPLETE**
+
+## Previous Task: IFC Window Size Validation - Fix Incorrect Window Detection
 
 Status: ✅ **COMPLETE** ✅
 
