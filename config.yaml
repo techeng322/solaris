@@ -6,8 +6,8 @@ calculation:
   insolation:
     # Minimum required insolation duration (hours:minutes:seconds)
     min_duration: "01:30:00"
-    # Calculation step in minutes
-    time_step: 1
+    # Calculation step in seconds (1.0 = second-level precision)
+    time_step: 1.0
     # Consider shadowing from surrounding buildings
     consider_shadowing: true
     # Shadow calculation accuracy (meters)

@@ -70,7 +70,8 @@ class SunPositionCalculator:
         declination_rad = math.radians(declination)
         
         # Hour angle (time from solar noon)
-        hour = dt.hour + dt.minute / 60.0 + dt.second / 3600.0
+        # Include seconds and microseconds for second-level precision
+        hour = dt.hour + dt.minute / 60.0 + dt.second / 3600.0 + dt.microsecond / 3600000000.0
         # Get UTC offset by converting to UTC and calculating the timedelta difference
         # This avoids issues with pytz's utcoffset() method which expects naive datetimes
         utc_dt = dt.astimezone(pytz.UTC)
