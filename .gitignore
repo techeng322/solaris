@@ -25,9 +25,9 @@ venv/
 env/
 ENV/
 venv312/
+temp_auto_push.bat
 
 # IDE
-.vscode/
 .idea/
 *.swp
 *.swo
@@ -53,3 +53,5 @@ references/SP123685_21_0.pdf
 PROJECT_COMPREHENSIVE_SUMMARY.md
 PROJECT_TOTAL_REQUIREMENTS.md
 WHY_SOFTWARE_ENGINEER_CANNOT_COMPLETE.md
+.gitignore
+temp_interactive_push.bat
