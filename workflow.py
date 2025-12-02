@@ -97,12 +97,16 @@ def calculate_insolation(
     
     calc_config = config.get('calculation', {}).get('insolation', {})
     
+    # Get time step in seconds (default: 1.0 second for second-level precision)
+    time_step_seconds = calc_config.get('time_step', 1.0)
+    
     logger.info(f"Initializing InsolationCalculator (lat: {building.location[0]}, lon: {building.location[1]})")
+    logger.info(f"Calculation precision: {time_step_seconds} second(s) - second-level precision enabled")
     calculator = InsolationCalculator(
         latitude=building.location[0],
         longitude=building.location[1],
         timezone=building.timezone,
-        time_step_minutes=calc_config.get('time_step', 1),
+        time_step_seconds=time_step_seconds,
         consider_shadowing=calc_config.get('consider_shadowing', True)
     )
     

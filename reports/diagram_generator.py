@@ -8,8 +8,8 @@ import matplotlib.patches as patches
 from matplotlib.figure import Figure
 import numpy as np
 
-from models.calculation_result import BuildingCalculationResult, RoomCalculationResult
-from models.building import Room, Window
+from models.calculation_result import BuildingCalculationResult, WindowCalculationResult
+from models.building import Window
 
 
 class DiagramGenerator:
@@ -27,34 +27,35 @@ class DiagramGenerator:
     
     def generate_insolation_diagram(
         self,
-        room_result: RoomCalculationResult,
+        window_result: WindowCalculationResult,
         output_path: Optional[str] = None
     ) -> Figure:
         """
-        Generate insolation duration diagram for a room.
+        Generate insolation duration diagram for a window.
         
         Args:
-            room_result: Room calculation result
+            window_result: Window calculation result
             output_path: Optional path to save diagram
         
         Returns:
             Matplotlib figure
         """
-        if not room_result.insolation_result:
+        if not window_result.insolation_result:
             raise ValueError("No insolation result available")
         
         fig, ax = plt.subplots(figsize=(10, 6))
         
-        ins = room_result.insolation_result
+        ins = window_result.insolation_result
         duration_seconds = ins.duration_seconds
         
         # Create bar chart
         hours = duration_seconds / 3600.0
         color = 'green' if ins.meets_requirement else 'red'
         
+        window_name = window_result.window_name or window_result.window_id
         ax.barh(['Инсоляция'], [hours], color=color, alpha=0.7)
         ax.set_xlabel('Продолжительность (часы)')
-        ax.set_title(f'Инсоляция помещения: {room_result.room_name}')
+        ax.set_title(f'Инсоляция окна: {window_name}')
         ax.grid(axis='x', alpha=0.3)
         
         # Add requirement line if available
@@ -76,60 +77,45 @@ class DiagramGenerator:
     
     def generate_keo_contour_diagram(
         self,
-        room_result: RoomCalculationResult,
-        room: Room,
+        window_result: WindowCalculationResult,
+        window: Window,
         output_path: Optional[str] = None
     ) -> Figure:
         """
-        Generate KEO contour diagram for a room.
+        Generate KEO contour diagram for a window.
         
         Args:
-            room_result: Room calculation result
-            room: Room model
+            window_result: Window calculation result
+            window: Window model
             output_path: Optional path to save diagram
         
         Returns:
             Matplotlib figure
         """
-        if not room_result.keo_grid_result:
-            raise ValueError("No KEO grid result available")
+        if not window_result.keo_result:
+            raise ValueError("No KEO result available")
         
         fig, ax = plt.subplots(figsize=(10, 8))
         
-        grid_data = room_result.keo_grid_result
-        grid_points = grid_data['grid_points']
+        keo = window_result.keo_result
         
-        # Extract coordinates and KEO values
-        x_coords = [p['point'][0] for p in grid_points]
-        y_coords = [p['point'][1] for p in grid_points]
-        keo_values = [p['keo'] for p in grid_points]
+        # For single window, show KEO value as a bar or single point
+        window_name = window_result.window_name or window_result.window_id
+        keo_value = keo.keo_total
         
-        # Create contour plot
-        if len(set(x_coords)) > 1 and len(set(y_coords)) > 1:
-            # Reshape for contour
-            x_unique = sorted(set(x_coords))
-            y_unique = sorted(set(y_coords))
-            
-            X = np.array(x_coords).reshape(len(y_unique), len(x_unique))
-            Y = np.array(y_coords).reshape(len(y_unique), len(x_unique))
-            Z = np.array(keo_values).reshape(len(y_unique), len(x_unique))
-            
-            contour = ax.contourf(X, Y, Z, levels=20, cmap='YlOrRd')
-            ax.contour(X, Y, Z, levels=20, colors='black', alpha=0.3, linewidths=0.5)
-            
-            # Add colorbar
-            cbar = plt.colorbar(contour, ax=ax)
-            cbar.set_label('КЕО (%)', rotation=270, labelpad=20)
-        else:
-            # Scatter plot if not enough points for contour
-            scatter = ax.scatter(x_coords, y_coords, c=keo_values, cmap='YlOrRd', s=100)
-            plt.colorbar(scatter, ax=ax, label='КЕО (%)')
+        # Create a simple visualization for single window KEO
+        ax.barh(['КЕО'], [keo_value], color='green' if keo.meets_requirement else 'red', alpha=0.7)
+        ax.set_xlabel('КЕО (%)')
+        ax.set_title(f'КЕО окна: {window_name}')
+        ax.grid(axis='x', alpha=0.3)
         
-        ax.set_xlabel('Глубина помещения (м)')
-        ax.set_ylabel('Ширина помещения (м)')
-        ax.set_title(f'Распределение КЕО: {room_result.room_name}')
-        ax.grid(True, alpha=0.3)
-        ax.set_aspect('equal')
+        # Add text annotation
+        ax.text(keo_value, 0, f' {keo_value:.2f}%', va='center', fontsize=12, fontweight='bold')
+        
+        # Add requirement line if available
+        if keo.min_required_keo:
+            ax.axvline(keo.min_required_keo, color='blue', linestyle='--', label=f'Требуемый КЕО: {keo.min_required_keo}%')
+            ax.legend()
         
         plt.tight_layout()
         
@@ -138,16 +124,16 @@ class DiagramGenerator:
         
         return fig
     
-    def generate_room_plan(
+    def generate_window_plan(
         self,
-        room: Room,
+        window: Window,
         output_path: Optional[str] = None
     ) -> Figure:
         """
-        Generate room plan with windows marked.
+        Generate window plan visualization.
         
         Args:
-            room: Room model
+            window: Window model
             output_path: Optional path to save diagram
         
         Returns:
@@ -155,37 +141,25 @@ class DiagramGenerator:
         """
         fig, ax = plt.subplots(figsize=(10, 8))
         
-        # Draw room outline
-        room_rect = patches.Rectangle(
-            (0, 0), room.depth, room.width,
-            linewidth=2, edgecolor='black', facecolor='lightgray', alpha=0.3
+        # Draw window
+        window_width = window.size[0]
+        window_height = window.size[1]
+        
+        window_rect = patches.Rectangle(
+            (0, 0), window_width, window_height,
+            linewidth=2, edgecolor='blue', facecolor='lightblue', alpha=0.5
         )
-        ax.add_patch(room_rect)
+        ax.add_patch(window_rect)
         
-        # Draw windows
-        for window in room.windows:
-            # Simplified window representation
-            window_x = window.center[0]
-            window_y = window.center[1]
-            window_width = window.size[0]
-            window_height = window.size[1]
-            
-            window_rect = patches.Rectangle(
-                (window_x - window_width/2, window_y - window_height/2),
-                window_width, window_height,
-                linewidth=2, edgecolor='blue', facecolor='lightblue', alpha=0.5
-            )
-            ax.add_patch(window_rect)
-            
-            # Add window label
-            ax.text(window_x, window_y, f"W{window.id[-4:]}", 
-                   ha='center', va='center', fontsize=8, fontweight='bold')
+        # Add window label
+        ax.text(window_width/2, window_height/2, f"Окно {window.id[-4:]}", 
+               ha='center', va='center', fontsize=12, fontweight='bold')
         
-        ax.set_xlim(-1, room.depth + 1)
-        ax.set_ylim(-1, room.width + 1)
-        ax.set_xlabel('Глубина (м)')
-        ax.set_ylabel('Ширина (м)')
-        ax.set_title(f'План помещения: {room.name}')
+        ax.set_xlim(-0.5, window_width + 0.5)
+        ax.set_ylim(-0.5, window_height + 0.5)
+        ax.set_xlabel('Ширина (м)')
+        ax.set_ylabel('Высота (м)')
+        ax.set_title(f'Окно: {window.id}')
         ax.grid(True, alpha=0.3)
         ax.set_aspect('equal')
         
@@ -217,19 +191,19 @@ class DiagramGenerator:
         summary = building_result.get_compliance_summary()
         
         labels = ['Соответствует', 'Не соответствует']
-        sizes = [summary['compliant_rooms'], summary['non_compliant_rooms']]
+        sizes = [summary['compliant_windows'], summary['non_compliant_windows']]
         colors_pie = ['green', 'red']
         
         ax1.pie(sizes, labels=labels, colors=colors_pie, autopct='%1.1f%%', startangle=90)
         ax1.set_title('Соответствие требованиям')
         
-        # Room-by-room compliance
-        room_names = [r.room_name for r in building_result.room_results]
-        compliance_status = [1 if r.is_compliant else 0 for r in building_result.room_results]
+        # Window-by-window compliance
+        window_names = [w.window_name or w.window_id for w in building_result.window_results]
+        compliance_status = [1 if w.is_compliant else 0 for w in building_result.window_results]
         
-        ax2.barh(room_names, compliance_status, color=['green' if s else 'red' for s in compliance_status])
+        ax2.barh(window_names[:20], compliance_status[:20], color=['green' if s else 'red' for s in compliance_status[:20]])  # Limit to 20 for readability
         ax2.set_xlabel('Статус (1=Соответствует, 0=Не соответствует)')
-        ax2.set_title('Соответствие по помещениям')
+        ax2.set_title('Соответствие по окнам (первые 20)')
         ax2.set_xlim(-0.1, 1.1)
         ax2.grid(axis='x', alpha=0.3)
         

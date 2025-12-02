@@ -24,9 +24,13 @@ PyOpenGL-accelerate>=3.1.0
 matplotlib>=3.7.0
 reportlab>=4.0.0
 pillow>=10.0.0
+python-docx>=1.1.0
 
 # BIM/IFC support
 ifcopenshell>=0.7.0
+
+# REVIT API support (optional - requires REVIT installation)
+pythonnet>=3.0.0
 
 # Date/time calculations for sun position
 astral>=3.2
@@ -38,4 +42,7 @@ pyyaml>=6.0
 # Testing
 pytest>=7.4.0
 pytest-cov>=4.1.0
+
+# Building executable
+pyinstaller>=6.0.0
 

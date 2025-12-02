@@ -20,7 +20,7 @@ class InsolationCalculator:
         latitude: float,
         longitude: float,
         timezone: str = "Europe/Moscow",
-        time_step_minutes: int = 1,
+        time_step_seconds: float = 1.0,
         consider_shadowing: bool = True
     ):
         """
@@ -30,11 +30,11 @@ class InsolationCalculator:
             latitude: Latitude in decimal degrees
             longitude: Longitude in decimal degrees
             timezone: Timezone name
-            time_step_minutes: Calculation time step in minutes (default: 1 minute for accuracy)
+            time_step_seconds: Calculation time step in seconds (default: 1.0 second for second-level precision)
             consider_shadowing: Whether to consider shadowing from surrounding buildings
         """
         self.sun_calculator = SunPositionCalculator(latitude, longitude, timezone)
-        self.time_step = timedelta(minutes=time_step_minutes)
+        self.time_step = timedelta(seconds=time_step_seconds)
         self.consider_shadowing = consider_shadowing
         self.shadowing_objects = []  # List of shadowing building geometries
     
@@ -56,7 +56,11 @@ class InsolationCalculator:
         required_duration: Optional[timedelta] = None
     ) -> Dict:
         """
-        Calculate insolation duration for a window.
+        Calculate insolation duration for a window with second-level precision.
+        
+        This method calculates insolation duration by checking sun position at each
+        time step (default: 1 second) throughout the day, providing precise
+        determination down to the second level as required by GOST R 57795-2017.
         
         Args:
             window_center: Window center coordinates (x, y, z)
@@ -68,19 +72,21 @@ class InsolationCalculator:
         Returns:
             Dictionary with:
             - duration: Total insolation duration as timedelta
-            - duration_seconds: Duration in seconds (for precise comparison)
-            - periods: List of insolation periods
+            - duration_seconds: Duration in seconds (for precise comparison, second-level precision)
+            - periods: List of insolation periods (datetime objects)
             - meets_requirement: Boolean indicating if requirement is met
-            - details: Detailed calculation data
+            - details: Detailed calculation data including precision information
         """
         # Get sunrise and sunset
         sunrise, sunset = self.sun_calculator.get_sunrise_sunset(calculation_date)
         
-        # Calculate insolation periods throughout the day
+        # Calculate insolation periods throughout the day with second-level precision
+        # Iterate through each time step (default: 1 second) from sunrise to sunset
         insolation_periods = []
         current_time = sunrise
         
-        total_insolation_seconds = 0
+        # Accumulate total insolation time in seconds (maintains second-level precision)
+        total_insolation_seconds = 0.0
         
         while current_time < sunset:
             # Check if sun is above horizon
@@ -126,7 +132,8 @@ class InsolationCalculator:
                 'sunrise': sunrise,
                 'sunset': sunset,
                 'total_daylight_hours': self.sun_calculator.get_daylight_hours(calculation_date),
-                'time_step_minutes': self.time_step.total_seconds() / 60.0
+                'time_step_seconds': self.time_step.total_seconds(),
+                'precision': 'second-level'
             }
         }
     
@@ -211,17 +218,19 @@ class InsolationCalculator:
     
     def _format_duration(self, seconds: float) -> str:
         """
-        Format duration in seconds to HH:MM:SS format.
+        Format duration in seconds to HH:MM:SS format with second-level precision.
         
         Args:
-            seconds: Duration in seconds
+            seconds: Duration in seconds (can be fractional for precision)
         
         Returns:
-            Formatted string (HH:MM:SS)
+            Formatted string (HH:MM:SS) with seconds rounded to nearest integer
         """
-        hours = int(seconds // 3600)
-        minutes = int((seconds % 3600) // 60)
-        secs = int(seconds % 60)
+        # Round to nearest second for display (maintains precision in calculations)
+        rounded_seconds = round(seconds)
+        hours = int(rounded_seconds // 3600)
+        minutes = int((rounded_seconds % 3600) // 60)
+        secs = int(rounded_seconds % 60)
         return f"{hours:02d}:{minutes:02d}:{secs:02d}"
     
     def calculate_room_insolation(

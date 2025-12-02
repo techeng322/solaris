@@ -8,7 +8,7 @@ from datetime import date
 from pathlib import Path
 import yaml
 
-from models.calculation_result import BuildingCalculationResult, RoomCalculationResult
+from models.calculation_result import BuildingCalculationResult, WindowCalculationResult
 from models.building import Building
 
 
@@ -55,14 +55,33 @@ class ReportGenerator:
         Returns:
             Path to generated report file
         """
-        if self.output_format == 'pdf':
+        # Detect format from file extension (user's choice in file dialog)
+        output_path_obj = Path(output_path)
+        file_ext = output_path_obj.suffix.lower()
+        
+        # Determine format from extension, fallback to config if no extension
+        if file_ext == '.pdf':
+            format_type = 'pdf'
+        elif file_ext == '.html' or file_ext == '.htm':
+            format_type = 'html'
+        elif file_ext == '.docx':
+            format_type = 'docx'
+        else:
+            # No extension or unknown extension - use config default
+            format_type = self.output_format
+            # If still no format, default to PDF
+            if not format_type:
+                format_type = 'pdf'
+        
+        # Generate report in detected format
+        if format_type == 'pdf':
             return self._generate_pdf_report(building_result, output_path, building)
-        elif self.output_format == 'html':
+        elif format_type == 'html':
             return self._generate_html_report(building_result, output_path, building)
-        elif self.output_format == 'docx':
+        elif format_type == 'docx':
             return self._generate_docx_report(building_result, output_path, building)
         else:
-            raise ValueError(f"Unsupported report format: {self.output_format}")
+            raise ValueError(f"Unsupported report format: {format_type}")
     
     def _generate_pdf_report(
         self,
@@ -112,7 +131,7 @@ class ReportGenerator:
             ['Дата расчета:', building_result.calculation_date.strftime('%d.%m.%Y') if building_result.calculation_date else 'N/A'],
         ]
         if building:
-            building_info.append(['Количество помещений:', str(building.get_total_rooms())])
+            building_info.append(['Количество окон:', str(building.get_total_windows())])
         
         info_table = Table(building_info, colWidths=[60*mm, 120*mm])
         info_table.setStyle(TableStyle([
@@ -131,26 +150,27 @@ class ReportGenerator:
         summary = building_result.get_compliance_summary()
         summary_text = f"""
         <b>Сводка по зданию:</b><br/>
-        Всего помещений: {summary['total_rooms']}<br/>
-        Соответствующих требованиям: {summary['compliant_rooms']}<br/>
-        Не соответствующих требованиям: {summary['non_compliant_rooms']}<br/>
+        Всего окон: {summary['total_windows']}<br/>
+        Соответствующих требованиям: {summary['compliant_windows']}<br/>
+        Не соответствующих требованиям: {summary['non_compliant_windows']}<br/>
         Процент соответствия: {summary['compliance_rate']*100:.1f}%
         """
         elements.append(Paragraph(summary_text, styles['Normal']))
         elements.append(Spacer(1, 20))
         
-        # Room results
-        elements.append(Paragraph("<b>Результаты по помещениям:</b>", styles['Heading2']))
+        # Window results
+        elements.append(Paragraph("<b>Результаты по окнам:</b>", styles['Heading2']))
         elements.append(Spacer(1, 12))
         
-        for room_result in building_result.room_results:
-            # Room header
-            room_header = f"Помещение: {room_result.room_name} (ID: {room_result.room_id})"
-            elements.append(Paragraph(room_header, styles['Heading3']))
+        for window_result in building_result.window_results:
+            # Window header
+            window_name = window_result.window_name or window_result.window_id
+            window_header = f"Окно: {window_name} (ID: {window_result.window_id})"
+            elements.append(Paragraph(window_header, styles['Heading3']))
             
             # Insolation results
-            if room_result.insolation_result:
-                ins = room_result.insolation_result
+            if window_result.insolation_result:
+                ins = window_result.insolation_result
                 ins_text = f"""
                 <b>Инсоляция:</b><br/>
                 Продолжительность: {ins.duration_formatted}<br/>
@@ -159,8 +179,8 @@ class ReportGenerator:
                 elements.append(Paragraph(ins_text, styles['Normal']))
             
             # KEO results
-            if room_result.keo_result:
-                keo = room_result.keo_result
+            if window_result.keo_result:
+                keo = window_result.keo_result
                 keo_text = f"""
                 <b>КЕО:</b><br/>
                 Общий КЕО: {keo.keo_total:.2f}%<br/>
@@ -169,14 +189,14 @@ class ReportGenerator:
                 elements.append(Paragraph(keo_text, styles['Normal']))
             
             # Compliance status
-            status_color = colors.green if room_result.is_compliant else colors.red
-            status_text = f"<b>Статус:</b> {'Соответствует' if room_result.is_compliant else 'Не соответствует'}"
+            status_color = colors.green if window_result.is_compliant else colors.red
+            status_text = f"<b>Статус:</b> {'Соответствует' if window_result.is_compliant else 'Не соответствует'}"
             status_para = Paragraph(status_text, styles['Normal'])
             elements.append(status_para)
             
             # Warnings
-            if room_result.warnings:
-                warnings_text = "<b>Предупреждения:</b><br/>" + "<br/>".join(room_result.warnings)
+            if window_result.warnings:
+                warnings_text = "<b>Предупреждения:</b><br/>" + "<br/>".join(window_result.warnings)
                 elements.append(Paragraph(warnings_text, styles['Normal']))
             
             elements.append(Spacer(1, 20))
@@ -216,10 +236,11 @@ class ReportGenerator:
             <p>Дата расчета: {building_result.calculation_date.strftime('%d.%m.%Y') if building_result.calculation_date else 'N/A'}</p>
         """
         
-        # Add room results
-        for room_result in building_result.room_results:
+        # Add window results
+        for window_result in building_result.window_results:
+            window_name = window_result.window_name or window_result.window_id
             html_content += f"""
-            <h3>Помещение: {room_result.room_name}</h3>
+            <h3>Окно: {window_name}</h3>
             <table>
                 <tr>
                     <th>Параметр</th>
@@ -227,8 +248,8 @@ class ReportGenerator:
                 </tr>
             """
             
-            if room_result.insolation_result:
-                ins = room_result.insolation_result
+            if window_result.insolation_result:
+                ins = window_result.insolation_result
                 html_content += f"""
                 <tr>
                     <td>Инсоляция</td>
@@ -242,8 +263,8 @@ class ReportGenerator:
                 </tr>
                 """
             
-            if room_result.keo_result:
-                keo = room_result.keo_result
+            if window_result.keo_result:
+                keo = window_result.keo_result
                 html_content += f"""
                 <tr>
                     <td>КЕО</td>
@@ -256,6 +277,15 @@ class ReportGenerator:
                     </td>
                 </tr>
                 """
+            
+            html_content += f"""
+                <tr>
+                    <td>Общий статус</td>
+                    <td class="{'compliant' if window_result.is_compliant else 'non-compliant'}">
+                        {'Соответствует' if window_result.is_compliant else 'Не соответствует'}
+                    </td>
+                </tr>
+            """
             
             html_content += "</table>"
         
@@ -276,7 +306,92 @@ class ReportGenerator:
         building: Optional[Building]
     ) -> str:
         """Generate DOCX report."""
-        # TODO: Implement DOCX generation using python-docx
-        # For now, fall back to HTML
-        return self._generate_html_report(building_result, output_path.replace('.docx', '.html'), building)
+        try:
+            from docx import Document
+            from docx.shared import Pt, Inches, RGBColor
+            from docx.enum.text import WD_ALIGN_PARAGRAPH
+            from docx.oxml.ns import qn
+        except ImportError:
+            # Fall back to HTML if python-docx is not available
+            import logging
+            logging.warning("python-docx not available, falling back to HTML")
+            return self._generate_html_report(building_result, output_path.replace('.docx', '.html'), building)
+        
+        # Create document
+        doc = Document()
+        
+        # Set document margins
+        sections = doc.sections
+        for section in sections:
+            section.top_margin = Inches(0.8)
+            section.bottom_margin = Inches(0.8)
+            section.left_margin = Inches(0.8)
+            section.right_margin = Inches(0.8)
+        
+        # Title
+        title = doc.add_heading('Расчет инсоляции и КЕО', 0)
+        title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        
+        # Building information
+        doc.add_paragraph(f'Здание: {building_result.building_name}')
+        if building_result.calculation_date:
+            doc.add_paragraph(f'Дата расчета: {building_result.calculation_date.strftime("%d.%m.%Y")}')
+        if building:
+            doc.add_paragraph(f'Количество окон: {building.get_total_windows()}')
+        
+        doc.add_paragraph()  # Empty line
+        
+        # Summary
+        summary = building_result.get_compliance_summary()
+        summary_para = doc.add_paragraph()
+        summary_para.add_run('Сводка по зданию:').bold = True
+        doc.add_paragraph(f'Всего окон: {summary["total_windows"]}')
+        doc.add_paragraph(f'Соответствующих требованиям: {summary["compliant_windows"]}')
+        doc.add_paragraph(f'Не соответствующих требованиям: {summary["non_compliant_windows"]}')
+        doc.add_paragraph(f'Процент соответствия: {summary["compliance_rate"]*100:.1f}%')
+        
+        doc.add_paragraph()  # Empty line
+        
+        # Window results
+        doc.add_heading('Результаты по окнам', level=1)
+        
+        for window_result in building_result.window_results:
+            window_name = window_result.window_name or window_result.window_id
+            doc.add_heading(f'Окно: {window_name}', level=2)
+            
+            # Insolation results
+            if window_result.insolation_result:
+                ins = window_result.insolation_result
+                doc.add_paragraph('Инсоляция:', style='List Bullet')
+                doc.add_paragraph(f'  Продолжительность: {ins.duration_formatted}')
+                doc.add_paragraph(f'  Соответствие требованиям: {"Да" if ins.meets_requirement else "Нет"}')
+            
+            # KEO results
+            if window_result.keo_result:
+                keo = window_result.keo_result
+                doc.add_paragraph('КЕО:', style='List Bullet')
+                doc.add_paragraph(f'  Общий КЕО: {keo.keo_total:.2f}%')
+                doc.add_paragraph(f'  Соответствие требованиям: {"Да" if keo.meets_requirement else "Нет"}')
+            
+            # Compliance status
+            status_para = doc.add_paragraph()
+            status_run = status_para.add_run(f'Статус: {"Соответствует" if window_result.is_compliant else "Не соответствует"}')
+            status_run.bold = True
+            if window_result.is_compliant:
+                status_run.font.color.rgb = RGBColor(0, 128, 0)  # Green
+            else:
+                status_run.font.color.rgb = RGBColor(255, 0, 0)  # Red
+            
+            # Warnings
+            if window_result.warnings:
+                doc.add_paragraph('Предупреждения:', style='List Bullet')
+                for warning in window_result.warnings:
+                    doc.add_paragraph(f'  - {warning}')
+            
+            doc.add_paragraph()  # Empty line between windows
+            doc.add_page_break()
+        
+        # Save document
+        doc.save(output_path)
+        return output_path
 

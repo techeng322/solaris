@@ -65,11 +65,20 @@ if PYQT6_AVAILABLE:
                 
                 # Emit mesh immediately for 3D viewer (before calculations)
                 # This allows the viewer to show the model while calculations are running
+                # Works for both GLB and IFC files
                 if hasattr(importer, 'mesh') and importer.mesh is not None:
                     import trimesh
                     if isinstance(importer.mesh, trimesh.Trimesh):
-                        self.progress.emit("Loading 3D model into viewer...")
+                        file_type = "IFC" if self.file_path.lower().endswith('.ifc') else "GLB"
+                        self.progress.emit(f"Loading {file_type} 3D model into viewer...")
                         self.mesh_loaded.emit(importer.mesh)
+                    else:
+                        import logging
+                        logging.warning(f"Importer mesh is not a trimesh.Trimesh object (type: {type(importer.mesh)})")
+                else:
+                    import logging
+                    file_type = "IFC" if self.file_path.lower().endswith('.ifc') else "GLB"
+                    logging.info(f"{file_type} importer has no mesh - mesh generation may have failed or file has no geometry")
                 
                 # STEP 2: Calculate insolation (if needed)
                 insolation_results = None
@@ -612,10 +621,25 @@ if PYQT6_AVAILABLE:
                 import traceback
                 self.log(f"Error details: {traceback.format_exc()}")
         
-        def load_glb_mesh_into_viewer(self, mesh):
-            """Load mesh into the embedded GLB viewer widget."""
+        def load_glb_mesh_into_viewer(self, mesh, auto_open_viewer=False):
+            """Load mesh into the embedded GLB viewer widget. Works for both GLB and IFC files.
+            
+            Args:
+                mesh: trimesh.Trimesh object to load
+                auto_open_viewer: If True, automatically open Trimesh viewer (for IFC files)
+            """
+            import logging
+            logger = logging.getLogger(__name__)
+            
             if self.glb_viewer_widget:
-                self.glb_viewer_widget.load_mesh(mesh)
+                logger.debug(f"Loading mesh into viewer widget: {len(mesh.vertices) if mesh else 0} vertices")
+                self.glb_viewer_widget.load_mesh(mesh, auto_open_viewer=auto_open_viewer)
+                # Ensure building is set in viewer for window highlighting
+                if self.building:
+                    self.glb_viewer_widget.set_building(self.building)
+                    logger.debug("Building set in viewer widget for highlighting support")
+            else:
+                logger.warning("GLB viewer widget not available - cannot load mesh")
         
         def ensure_logs_viewer_connected(self):
             """Ensure logs viewer widget is connected to log handler."""
@@ -720,23 +744,45 @@ if PYQT6_AVAILABLE:
             self.log(f"{t.MODEL_LOADED}: {building.name}")
             self.log(f"Windows / Окон: {building.get_total_windows()}")
             
-            # Load GLB mesh into viewer if applicable
+            # Load mesh into viewer if applicable (GLB or IFC)
             if hasattr(self.import_worker, 'importer') and self.import_worker.importer:
                 importer = self.import_worker.importer
-                if self.current_file_path and self.current_file_path.lower().endswith('.glb'):
-                    if hasattr(importer, 'mesh') and importer.mesh is not None:
-                        self.load_glb_mesh_into_viewer(importer.mesh)
+                # Check if importer has a mesh (works for both GLB and IFC)
+                if hasattr(importer, 'mesh'):
+                    if importer.mesh is not None:
+                        import trimesh
+                        if isinstance(importer.mesh, trimesh.Trimesh):
+                            file_type = "IFC" if self.current_file_path and self.current_file_path.lower().endswith('.ifc') else "GLB"
+                            self.log(f"Loading {file_type} mesh into 3D viewer: {len(importer.mesh.vertices):,} vertices, {len(importer.mesh.faces):,} faces")
+                            # For IFC files, automatically open Trimesh viewer
+                            auto_open = file_type == "IFC"
+                            self.load_glb_mesh_into_viewer(importer.mesh, auto_open_viewer=auto_open)
+                            self.log(f"✓ {file_type} mesh loaded into 3D viewer successfully")
+                            if auto_open:
+                                self.log("Trimesh viewer opened automatically for IFC file")
+                        else:
+                            self.log(f"Warning: Mesh is not a trimesh.Trimesh object (type: {type(importer.mesh)})")
                     else:
-                        # Fallback: try loading from file
-                        self.load_glb_into_viewer(self.current_file_path)
+                        file_type = "IFC" if self.current_file_path and self.current_file_path.lower().endswith('.ifc') else "GLB"
+                        self.log(f"⚠ {file_type} importer has no mesh - 3D visualization may not be available")
+                        self.log("This is normal if the file has no geometry or geometry extraction failed")
+                elif self.current_file_path and self.current_file_path.lower().endswith('.glb'):
+                    # Fallback for GLB: try loading from file
+                    self.load_glb_into_viewer(self.current_file_path)
             
             # Update object tree viewer widget if it exists
             if self.object_tree_viewer_widget:
-                self.object_tree_viewer_widget.set_building(building)
+                # Pass importer to tree viewer so it can display IFC elements
+                importer = None
+                if hasattr(self.import_worker, 'importer'):
+                    importer = self.import_worker.importer
+                self.object_tree_viewer_widget.set_building(building, importer=importer)
                 # Connect object tree selection to 3D viewer highlighting (only once)
                 if not self.object_tree_connected:
                     self.object_tree_viewer_widget.item_selected.connect(self.on_object_tree_selection)
                     self.object_tree_connected = True
+                    import logging
+                    logging.info("Object tree selection connected to 3D viewer highlighting")
             
             # Update 3D viewer with building data for window highlighting
             if self.glb_viewer_widget:
@@ -754,14 +800,17 @@ if PYQT6_AVAILABLE:
             self.log(f"{t.COMPLIANCE_RATE}: {summary['compliance_rate']*100:.1f}%")
         
         def on_mesh_loaded(self, mesh):
-            """Handle mesh loaded signal - load into embedded 3D viewer widget."""
+            """Handle mesh loaded signal - load into embedded 3D viewer widget. Works for both GLB and IFC files."""
             try:
                 import trimesh
                 if isinstance(mesh, trimesh.Trimesh):
                     self.current_mesh = mesh  # Store mesh reference
                     # Load into embedded viewer widget
                     self.load_glb_mesh_into_viewer(mesh)
-                    self.log(f"3D model loaded into viewer: {len(mesh.vertices):,} vertices, {len(mesh.faces):,} faces")
+                    file_type = "IFC" if self.current_file_path and self.current_file_path.lower().endswith('.ifc') else "GLB"
+                    self.log(f"{file_type} 3D model loaded into viewer: {len(mesh.vertices):,} vertices, {len(mesh.faces):,} faces")
+                else:
+                    self.log(f"Warning: Mesh is not a trimesh.Trimesh object (type: {type(mesh)})")
             except Exception as e:
                 self.log(f"Could not load mesh into viewer: {e}")
                 import traceback
@@ -804,14 +853,48 @@ if PYQT6_AVAILABLE:
         
         def on_object_tree_selection(self, selected_object):
             """Handle object selection from object tree viewer."""
-            from models.building import Window
-            # If a window is selected, highlight it in the 3D viewer
+            from models.building import Window, Building
+            import logging
+            logger = logging.getLogger(__name__)
+            
+            logger.info(f"Object selected in tree: {type(selected_object).__name__}")
+            
+            if not self.glb_viewer_widget:
+                logger.warning("3D viewer widget not available for highlighting")
+                return
+            
+            # Ensure building is set in viewer (needed for highlighting)
+            if self.building:
+                self.glb_viewer_widget.set_building(self.building)
+                logger.debug(f"Building set in 3D viewer for highlighting")
+            
+            # Switch to 3D viewer tab to show the highlight
+            self.switch_to_3d_viewer()
+            
+            # If a window is selected, highlight it (Trimesh viewer will open automatically if needed)
             if isinstance(selected_object, Window):
-                if self.glb_viewer_widget:
-                    self.glb_viewer_widget.highlight_window(selected_object)
+                logger.info(f"Window selected: {selected_object.id} - highlighting")
+                # Highlight the selected window (this will open Trimesh viewer automatically if not open)
+                self.glb_viewer_widget.highlight_window(selected_object)
+                logger.info(f"Highlight request sent for window: {selected_object.id}")
+            elif isinstance(selected_object, Building):
+                logger.info(f"Building selected: {selected_object.id} - clearing highlight")
+                # Clear highlight for building selection
+                self.glb_viewer_widget.highlight_window(None)
             else:
-                # Clear highlight if non-window is selected
-                if self.glb_viewer_widget:
+                # For any other object, try to highlight if it has the required attributes
+                logger.info(f"Object selected: {type(selected_object).__name__} - attempting highlight")
+                # Check if object has required attributes for highlighting (id, center, normal, size)
+                if (hasattr(selected_object, 'id') and 
+                    hasattr(selected_object, 'center') and 
+                    hasattr(selected_object, 'normal') and 
+                    hasattr(selected_object, 'size')):
+                    # Try to highlight (this will open Trimesh viewer automatically if not open)
+                    self.glb_viewer_widget.highlight_window(selected_object)
+                    logger.info(f"Highlight request sent for object: {getattr(selected_object, 'id', 'unknown')}")
+                else:
+                    logger.debug(f"Object {type(selected_object).__name__} does not have required attributes for highlighting")
+                    # Clear highlight if object can't be highlighted
                     self.glb_viewer_widget.highlight_window(None)
         
         def update_results_table(self, result):
@@ -874,14 +957,29 @@ if PYQT6_AVAILABLE:
                 QMessageBox.warning(self, t.WARNING, t.NO_RESULTS)
                 return
             
-            file_path, _ = QFileDialog.getSaveFileName(
+            file_path, selected_filter = QFileDialog.getSaveFileName(
                 self,
                 t.EXPORT_REPORT,
                 "report.pdf",
-                "PDF Files (*.pdf);;HTML Files (*.html)"
+                "PDF Files (*.pdf);;HTML Files (*.html);;DOCX Files (*.docx)"
             )
             
             if file_path:
+                # Ensure file has correct extension based on selected filter
+                from pathlib import Path
+                file_path_obj = Path(file_path)
+                if not file_path_obj.suffix:
+                    # No extension - add based on filter
+                    if 'PDF' in selected_filter:
+                        file_path = str(file_path_obj.with_suffix('.pdf'))
+                    elif 'HTML' in selected_filter:
+                        file_path = str(file_path_obj.with_suffix('.html'))
+                    elif 'DOCX' in selected_filter:
+                        file_path = str(file_path_obj.with_suffix('.docx'))
+                    else:
+                        # Default to PDF
+                        file_path = str(file_path_obj.with_suffix('.pdf'))
+                
                 try:
                     from reports import ReportGenerator
                     report_gen = ReportGenerator()
