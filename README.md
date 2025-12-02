@@ -1,3 +1,7 @@
+
+
+![photo_2025-12-02_13-53-57](https://github.com/user-attachments/assets/2c72df4e-ff71-4c97-97a7-feb7a736e637)
+
 # Solaris Insolation Calculator
 
 A comprehensive GUI application for calculating insolation duration and natural illumination (KEO) for buildings, compliant with Russian building standards.
